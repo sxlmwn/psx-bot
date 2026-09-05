@@ -30,7 +30,7 @@ Use the sidebar on the left to navigate the desk modules:
 1. **Today:** Real-time PSX feed, ORB breakout signals, session status.
 2. **Demo Account:** Account balance, double-entry ledger, equity curve, graduation status.
 3. **Portfolio:** Real holdings, immutable position plans, hold/trim/exit calls.
-4. **Journal:** Closed trades, Claude 4-verdict post-mortems.
+4. **Journal:** Closed trades, Groq (openai/gpt-oss-120b) 4-verdict post-mortems.
 5. **Lessons:** Active memory of disciplined rules cited before each session.
 6. **Mistakes:** Independent post-trade audit log & discrepancy alerts.
 7. **System Health:** 60s heartbeats, component latencies, failure tracking.

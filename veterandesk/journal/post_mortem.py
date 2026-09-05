@@ -1,5 +1,5 @@
 """
-Trade Journal and Claude Post-Mortem Module.
+Trade Journal and Groq Post-Mortem Module.
 
 Enforces:
 1. Strict schema validation for post-mortems.
@@ -8,18 +8,18 @@ Enforces:
    - 'Wrong'
    - 'Right-for-wrong-reason'
    - 'Wrong-for-right-reason'
-3. Outbound retry queue for Claude / LLM API calls.
+3. Outbound retry queue for Groq / LLM API calls.
 4. Immutable original post-mortem records.
 """
 
-from __future__ import annotations
-
+import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
-import httpx
+from groq import Groq
 
 from veterandesk.config import settings
 from veterandesk.execution.paper_broker import DemoTrade
@@ -181,13 +181,14 @@ class PostMortemEngine:
 
     async def _generate_post_mortem(self, record: JournalRecord) -> bool:
         """
-        Query Claude / Groq or deterministic fallback to produce structured verdict.
+        Query Groq API (or deterministic fallback) to produce structured verdict.
+        Uses model 'openai/gpt-oss-120b' with fallback to 'qwen/qwen3.6-27b'.
         """
-        # If API key not provided or mock requested:
-        if not settings.anthropic_api_key or settings.use_mock_llm_if_no_key:
+        groq_api_key = settings.groq_api_key or os.environ.get("GROQ_API_KEY")
+        if not groq_api_key or settings.use_mock_llm_if_no_key:
             return self._generate_deterministic_fallback(record)
 
-        # Real Anthropic API Call
+        # Real Groq API Call
         prompt = (
             f"You are the disciplined chief risk officer for a PSX trading desk. Analyze this trade:\n"
             f"Ticker: {record.ticker}\n"
@@ -208,26 +209,41 @@ class PostMortemEngine:
             f' "transferable_lesson": "One general rule/lesson to apply to future trades (must NEVER claim positive expectancy on a net loss)"}}\n'
         )
 
-        headers = {
-            "x-api-key": settings.anthropic_api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        payload = {
-            "model": settings.anthropic_model,
-            "max_tokens": 500,
-            "messages": [{"role": "user", "content": prompt}],
-        }
+        def _call_groq(model_name: str) -> Optional[str]:
+            client = Groq()
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are the chief risk officer for a quantitative PSX trading desk. "
+                            "You evaluate closed trades with strict mathematical discipline and return only valid JSON."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+            return completion.choices[0].message.content
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-            if resp.status_code != 200:
-                logger.warning("anthropic_api_error", status=resp.status_code, body=resp.text)
-                return False
+        content: Optional[str] = None
+        models_to_try = [settings.groq_model, settings.groq_fallback_model]
+        for candidate_model in models_to_try:
+            try:
+                content = await asyncio.to_thread(_call_groq, candidate_model)
+                if content:
+                    logger.info("groq_post_mortem_success", model=candidate_model, trade_id=record.trade_id)
+                    break
+            except Exception as e:
+                logger.warning("groq_post_mortem_attempt_failed", model=candidate_model, error=str(e))
 
-            data = resp.json()
-            content = data["content"][0]["text"]
-            return self._parse_and_apply_llm_response(record, content)
+        if not content:
+            logger.warning("groq_all_models_failed_fallback_to_deterministic", trade_id=record.trade_id)
+            return self._generate_deterministic_fallback(record)
+
+        return self._parse_and_apply_llm_response(record, content)
 
     def _generate_deterministic_fallback(self, record: JournalRecord) -> bool:
         """

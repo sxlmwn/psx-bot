@@ -30,7 +30,7 @@ VeteranDesk is an autonomous trading agent designed to operate with the discipli
 4. **Criterion #4 — Position Sizing Matches All Boundary Cases:**
    - 100% unit test coverage validating mathematical sizing (1% risk limit, liquidity caps, zero-volume edge cases, and tick sizing).
 5. **Criterion #6 — Every Closed Trade Has a Post-Mortem or Pending Status:**
-   - Outbound queue and retry mechanism guarantee that all closed trades receive one of 4 discrete verdicts (`Right`, `Wrong`, `Right-for-wrong-reason`, `Wrong-for-right-reason`) or stay in a persistent pending state.
+   - Outbound queue and retry mechanism guarantee that all closed trades receive one of 4 discrete verdicts (`Right`, `Wrong`, `Right-for-wrong-reason`, `Wrong-for-right-reason`) via Groq (`openai/gpt-oss-120b`) or stay in a persistent pending state.
 6. **Criterion #7 — Lessons Cited in Subsequent Setups:**
    - Active lessons memory indexes past trade lessons, injects them into pre-market theses, and tracks live citation counts (`times_cited`) in Supabase.
 7. **Criterion #8 — Telegram Signal Delivery with Schema Validation:**
@@ -81,7 +81,7 @@ veterandesk/
 ├── risk/                  # 100% test-covered Risk & Discipline Engine (1% risk, 2% daily loss halt)
 ├── execution/             # Atomic paper broker & reconciled Double-Entry Bookkeeping Ledger
 ├── portfolio/             # Real-portfolio position planning with mandatory stop-loss enforcement
-├── journal/               # Trade journal with 4-verdict post-mortems & active lessons memory
+├── journal/               # Trade journal with 4-verdict post-mortems (Groq openai/gpt-oss-120b) & active lessons memory
 ├── audit/                 # Independent Mistake Detection & discrepancy audit engine
 ├── alerts/                # Telegram notifications with outbound retry queue & schema validation
 ├── health/                # 60-second system heartbeat & component outage monitor
@@ -93,7 +93,7 @@ veterandesk/
 
 ## 🔒 The 8 Non-Negotiable Principles
 
-1. **LLM Never Does Arithmetic:** Prices, position sizes, P&L, fee schedules, indicators, and risk percentages are 100% computed by deterministic Python code.
+1. **LLM Never Does Arithmetic:** Prices, position sizes, P&L, fee schedules, indicators, and risk percentages are 100% computed by deterministic Python code. LLM reasoning via Groq (`openai/gpt-oss-120b`) is strictly restricted to qualitative trade post-mortems and transferable lesson synthesis.
 2. **No Trade Without a Stop-Loss:** Enforced at the database constraint level (`NOT NULL`, `CHECK stop_loss < entry_price`) and in code.
 3. **Rules Cannot Be Bypassed:** Risk limits are hard ceilings in code.
 4. **Immediate Decision Logging:** Every check logged with inputs, rule verdicts, and timestamps.

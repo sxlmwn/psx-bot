@@ -87,11 +87,13 @@ class Settings(BaseSettings):
     graduation_max_drawdown_pct: float = 10.00
     graduation_clean_recent_trades: int = 20
 
-    # Reasoning / Post-Mortem (Claude API)
+    # Reasoning / Post-Mortem (Groq API)
+    groq_api_key: Optional[str] = Field(default=None, alias="GROQ_API_KEY")
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_fallback_model: str = "qwen/qwen3.6-27b"
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
     anthropic_model: str = "claude-3-7-sonnet-20250219"
-    groq_api_key: Optional[str] = Field(default=None, alias="GROQ_API_KEY")
-    use_mock_llm_if_no_key: bool = True
+    use_mock_llm_if_no_key: bool = False
 
     # Telegram
     telegram_bot_token: Optional[str] = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
