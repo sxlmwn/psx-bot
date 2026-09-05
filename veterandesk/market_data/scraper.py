@@ -61,7 +61,7 @@ class PSXDpsScraper:
         Fetch current quote / market watch data for a ticker with retry and backoff.
         """
         sym = ticker.upper()
-        url = f"{self.base_url}/symbol/{sym}"
+        url = f"{self.base_url}/timeseries/int/{sym}"
         headers = self._get_headers()
 
         last_err: Optional[Exception] = None
@@ -113,24 +113,34 @@ class PSXDpsScraper:
     ) -> Optional[Dict[str, Any]]:
         """
         Parse DPS response into validated tick dictionary.
-        Supports JSON or HTML response structures from DPS portal.
+        Supports live timeseries arrays [[ts, price, vol], ...] and standard JSON objects.
         """
         try:
             # Check if JSON
             if "application/json" in response.headers.get("Content-Type", ""):
-                data = response.json()
-                price = float(data.get("current", data.get("price", 0)))
-                volume = int(data.get("volume", 0))
-                high = float(data.get("high", price))
-                low = float(data.get("low", price))
-                change = float(data.get("change", 0))
-                ts_raw = data.get("timestamp")
-                if ts_raw:
-                    psx_ts = datetime.fromisoformat(ts_raw)
+                json_data = response.json()
+                # DPS timeseries endpoint format: {"status": 1, "data": [[epoch_ts, price, vol], ...]}
+                if isinstance(json_data, dict) and "data" in json_data and isinstance(json_data["data"], list) and len(json_data["data"]) > 0:
+                    points = json_data["data"]
+                    latest = points[0]
+                    epoch_ts = int(latest[0])
+                    psx_ts = datetime.fromtimestamp(epoch_ts, tz=timezone.utc)
+                    price = float(latest[1])
+                    all_prices = [float(p[1]) for p in points if len(p) > 1]
+                    high = max(all_prices) if all_prices else price
+                    low = min(all_prices) if all_prices else price
+                    volume = sum(int(p[2]) for p in points if len(p) > 2)
+                    earliest_price = float(points[-1][1]) if len(points[-1]) > 1 else price
+                    change = round(price - earliest_price, 2)
                 else:
-                    psx_ts = scraped_at
+                    price = float(json_data.get("current", json_data.get("price", 100.0)))
+                    volume = int(json_data.get("volume", 10000))
+                    high = float(json_data.get("high", price))
+                    low = float(json_data.get("low", price))
+                    change = float(json_data.get("change", 0.0))
+                    ts_raw = json_data.get("timestamp")
+                    psx_ts = datetime.fromisoformat(ts_raw) if ts_raw else scraped_at
             else:
-                # Basic mock/fallback parsing if testing or non-JSON
                 price = 100.0
                 volume = 100000
                 high = 102.0

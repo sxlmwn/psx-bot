@@ -43,15 +43,20 @@ post_mortem_engine = PostMortemEngine(lessons_memory=lessons_mem)
 health_monitor = SystemHealthMonitor(ledger=ledger)
 
 
+from veterandesk.database import db_manager
+
+
 @app.get("/health", tags=["System"])
 def get_health() -> Dict[str, Any]:
     """Get system health heartbeats and overall status."""
     statuses = health_monitor.run_heartbeat()
     is_down = health_monitor.is_system_down()
+    db_check = db_manager.check_connection()
     return {
         "status": "RED" if is_down else "GREEN",
         "is_system_down": is_down,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "database_connection": db_check,
         "components": {k: {"status": v.status.value, "latency_ms": v.latency_ms, "message": v.message} for k, v in statuses.items()}
     }
 

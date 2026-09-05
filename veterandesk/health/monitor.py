@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 import time
 
 from veterandesk.config import settings
+from veterandesk.database import db_manager
 from veterandesk.execution.ledger import DoubleEntryLedger
 from veterandesk.logging import get_logger
 
@@ -88,7 +89,12 @@ class SystemHealthMonitor:
         now = datetime.now(timezone.utc)
         self.last_heartbeat = now
 
-        # Verify ledger reconciliation if ledger is attached
+        # 1. Check real DB connectivity
+        db_res = db_manager.check_connection()
+        db_status = ComponentStatus.GREEN if db_res["status"] == "GREEN" else ComponentStatus.RED
+        self.record_check("database", db_status, db_res["latency_ms"], db_res["message"])
+
+        # 2. Verify ledger reconciliation if ledger is attached
         if self.ledger is not None:
             t0 = time.perf_counter()
             is_reconciled, diff, msg = self.ledger.reconcile()
