@@ -2,15 +2,16 @@
 Tests for Real Portfolio Plans, Graduation Metrics, and Journal Post-Mortems.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 import pytest
 
 from veterandesk.portfolio.manager import PortfolioManager, PortfolioAction
 from veterandesk.execution.graduation import compute_performance_metrics
-from veterandesk.execution.paper_broker import DemoTrade, ExitReason
+from veterandesk.execution.ledger import DoubleEntryLedger
+from veterandesk.execution.paper_broker import DemoTrade, ExitReason, PaperBroker
 from veterandesk.journal.lessons import LessonsMemory
 from veterandesk.journal.post_mortem import PostMortemEngine, TradeVerdict
-from veterandesk.strategy.models import SignalAction
+from veterandesk.strategy.models import SignalAction, TradeSignal
 
 
 class TestPortfolioAndJournal:
@@ -152,3 +153,112 @@ class TestPortfolioAndJournal:
         prompt_context = lessons_mem.build_pre_session_prompt_context()
         assert "VETERANDESK ACTIVE LESSONS MEMORY" in prompt_context
         assert active_lessons[0].times_cited == 1
+
+    @pytest.mark.asyncio
+    async def test_post_mortem_loss_with_target_hit_cannot_be_right_or_positive_expectancy(self):
+        """
+        Verify that a trade hitting target nominally but suffering a net loss due to
+        friction is classified as 'Right-for-wrong-reason' and NEVER claims positive expectancy.
+        """
+        lessons_mem = LessonsMemory()
+        engine = PostMortemEngine(lessons_memory=lessons_mem)
+
+        trade = DemoTrade(
+            trade_id="TRD_FRICTION_LOSS_1",
+            signal_id="SIG_FRICTION_1",
+            ticker="OGDC",
+            action=SignalAction.BUY,
+            shares=1506,
+            entry_price=328.48,
+            stop_loss=327.00,
+            target_price=329.98,
+            slippage_pct=0.002,
+            filled_entry_price=329.14,
+            exit_price=329.98,
+            filled_exit_price=329.32,
+            exit_reason=ExitReason.TARGET_HIT,
+            gross_pnl=271.08,
+            entry_fees=768.31,
+            exit_fees=768.73,
+            net_pnl=-1265.96,
+        )
+
+        record = engine.queue_trade_for_post_mortem(trade)
+        assert record.net_pnl == -1265.96
+        assert record.exit_reason == "TARGET_HIT"
+
+        processed = await engine.process_pending_queue()
+        assert processed == 1
+
+        completed = engine.completed_journal["TRD_FRICTION_LOSS_1"]
+        # Non-negotiable: MUST NOT be 'Right'
+        assert completed.verdict == TradeVerdict.RIGHT_FOR_WRONG_REASON
+        assert completed.verdict != TradeVerdict.RIGHT
+        # Non-negotiable: Analysis must highlight round-trip friction and net loss
+        assert "friction" in completed.post_mortem_analysis.lower() or "transaction" in completed.post_mortem_analysis.lower()
+        # Non-negotiable: Must NEVER claim positive expectancy on a net loss!
+        assert "positive expectancy" not in completed.transferable_lesson.lower()
+
+    def test_exit_condition_validation_and_evaluation(self):
+        """
+        Verify PaperBroker exit condition evaluation and strict validation in execute_exit.
+        """
+        ledger = DoubleEntryLedger(starting_balance_pkr=1000000.0)
+        broker = PaperBroker(ledger=ledger, persist_to_db=False)
+
+        sig = TradeSignal(
+            signal_id="SIG_EXIT_TEST",
+            ticker="OGDC",
+            entry_price=328.48,
+            stop_loss=327.00,
+            target_price=329.98,
+            reward_risk_ratio=1.01,
+            position_size=100,
+            confidence_pct=75,
+            invalidation_reason="Test",
+            created_at=datetime.now(timezone.utc),
+            session_id="exit_test_session",
+        )
+
+        trade = broker.execute_buy(signal=sig, shares=100, scraped_price=328.48)
+
+        # 1. evaluate_exit_condition
+        # Price below target and above stop -> None
+        assert broker.evaluate_exit_condition(trade, scraped_price=328.50) is None
+        # Price reaches target -> TARGET_HIT
+        assert broker.evaluate_exit_condition(trade, scraped_price=329.98) == ExitReason.TARGET_HIT
+        assert broker.evaluate_exit_condition(trade, scraped_price=330.50) == ExitReason.TARGET_HIT
+        # Price reaches or drops below stop -> STOP_HIT
+        assert broker.evaluate_exit_condition(trade, scraped_price=327.00) == ExitReason.STOP_HIT
+        assert broker.evaluate_exit_condition(trade, scraped_price=326.50) == ExitReason.STOP_HIT
+        # Cutoff time >= 15:20 PKT -> TIME_STOP_1520 takes priority
+        assert broker.evaluate_exit_condition(trade, scraped_price=328.50, current_time_pkt=time(15, 20)) == ExitReason.TIME_STOP_1520
+        assert broker.evaluate_exit_condition(trade, scraped_price=328.50, current_time_pkt=time(15, 25)) == ExitReason.TIME_STOP_1520
+
+        # 2. Strict validation in execute_exit
+        # Attempting TARGET_HIT when market price is below target -> ValueError
+        with pytest.raises(ValueError, match="Cannot exit with TARGET_HIT: market price PKR 329.32 < target price PKR 329.98"):
+            broker.execute_exit(
+                trade_id=trade.trade_id,
+                scraped_price=329.32,
+                exit_reason=ExitReason.TARGET_HIT,
+            )
+
+        # Attempting STOP_HIT when market price is above stop -> ValueError
+        with pytest.raises(ValueError, match="Cannot exit with STOP_HIT: market price PKR 328.00 > stop loss PKR 327.00"):
+            broker.execute_exit(
+                trade_id=trade.trade_id,
+                scraped_price=328.00,
+                exit_reason=ExitReason.STOP_HIT,
+            )
+
+        # Valid TARGET_HIT exit at market price 329.98
+        closed_trade = broker.execute_exit(
+            trade_id=trade.trade_id,
+            scraped_price=329.98,
+            exit_reason=ExitReason.TARGET_HIT,
+        )
+        assert closed_trade.exit_price == 329.98
+        assert closed_trade.filled_exit_price == 329.32
+        assert closed_trade.exit_reason == ExitReason.TARGET_HIT
+

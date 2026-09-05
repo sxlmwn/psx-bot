@@ -55,6 +55,8 @@ class JournalRecord:
     user_annotation: Optional[str] = None
     status: PostMortemStatus = PostMortemStatus.PENDING
     retry_count: int = 0
+    net_pnl: float = 0.0
+    exit_reason: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
 
@@ -81,8 +83,16 @@ class PostMortemEngine:
             "kse100_direction": "positive",
         }
 
-        entry_desc = f"ORB breakout buy at PKR {trade.filled_entry_price:.2f} with stop at PKR {trade.stop_loss:.2f}"
-        exit_desc = f"Closed via {trade.exit_reason.value if trade.exit_reason else 'UNKNOWN'} at PKR {trade.filled_exit_price:.2f}, Net PnL: PKR {trade.net_pnl:+,.2f}"
+        entry_desc = (
+            f"ORB breakout buy at PKR {trade.filled_entry_price:.2f} "
+            f"(market: PKR {trade.entry_price:.2f}) with stop at PKR {trade.stop_loss:.2f}"
+        )
+        reason_val = trade.exit_reason.value if trade.exit_reason else "UNKNOWN"
+        market_exit_str = f"market: PKR {trade.exit_price:.2f}, " if trade.exit_price is not None else ""
+        exit_desc = (
+            f"Closed via {reason_val} at {market_exit_str}fill: PKR {trade.filled_exit_price:.2f} "
+            f"(slippage: {trade.slippage_pct*100:.2f}%), Net PnL: PKR {trade.net_pnl:+,.2f}"
+        )
 
         record = JournalRecord(
             trade_id=trade.trade_id,
@@ -92,6 +102,8 @@ class PostMortemEngine:
             market_conditions=conditions,
             status=PostMortemStatus.PENDING,
             retry_count=0,
+            net_pnl=trade.net_pnl,
+            exit_reason=reason_val,
         )
         self.pending_queue.append(record)
         self._persist_journal_record(record)
@@ -181,11 +193,19 @@ class PostMortemEngine:
             f"Ticker: {record.ticker}\n"
             f"Entry: {record.entry_rationale}\n"
             f"Exit: {record.exit_rationale}\n"
+            f"Net PnL: PKR {record.net_pnl:+,.2f}\n"
+            f"Exit Reason: {record.exit_reason or 'UNKNOWN'}\n"
             f"Conditions: {json.dumps(record.market_conditions)}\n\n"
+            f"CRITICAL DISCIPLINE RULES FOR VERDICTS:\n"
+            f"1. A trade with Net PnL <= 0 must NEVER be called 'Right' and must NEVER be described as having 'positive expectancy'.\n"
+            f"2. If price hit target nominally but Net PnL was negative due to commissions and slippage, classify as 'Right-for-wrong-reason' or 'Wrong-for-right-reason', explaining inadequate friction margin.\n"
+            f"3. If stop loss was hit cleanly according to discipline, classify as 'Wrong-for-right-reason'.\n"
+            f"4. If closed at 15:20 PKT cutoff: 'Right' if net profit, 'Wrong-for-right-reason' if net loss.\n"
+            f"5. Only trades with net positive PnL that followed the plan can be classified as 'Right'.\n\n"
             f"Respond ONLY with a JSON object containing:\n"
             f'{{"verdict": "Right" | "Wrong" | "Right-for-wrong-reason" | "Wrong-for-right-reason",\n'
             f' "analysis": "2-3 concise sentences analyzing execution vs plan",\n'
-            f' "transferable_lesson": "One general rule/lesson to apply to future trades"}}\n'
+            f' "transferable_lesson": "One general rule/lesson to apply to future trades (must NEVER claim positive expectancy on a net loss)"}}\n'
         )
 
         headers = {
@@ -213,29 +233,77 @@ class PostMortemEngine:
         """
         Deterministic, rule-based fallback post-mortem generator.
         Ensures system functions 100% reliably even when offline.
+
+        Strict rules:
+        - A trade with Net PnL <= 0 must NEVER be labeled 'Right' and must NEVER claim 'positive expectancy'.
+        - If target was nominally reached but net PnL is negative (due to commissions + slippage exceeding gross move),
+          verdict MUST be 'Right-for-wrong-reason' with an analysis highlighting inadequate friction margin.
+        - If stopped out according to discipline, verdict is 'Wrong-for-right-reason'.
+        - If closed at 15:20 cutoff: 'Right' if profitable, 'Wrong-for-right-reason' if loss.
         """
-        is_profit = "Net PnL: PKR +" in record.exit_rationale
-        hit_stop = "STOP_HIT" in record.exit_rationale
-        hit_target = "TARGET_HIT" in record.exit_rationale
+        is_net_profit = record.net_pnl > 0
+        hit_stop = record.exit_reason == "STOP_HIT" or "STOP_HIT" in record.exit_rationale
+        hit_target = record.exit_reason == "TARGET_HIT" or "TARGET_HIT" in record.exit_rationale
+        hit_time_stop = record.exit_reason == "TIME_STOP_1520" or "TIME_STOP_1520" in record.exit_rationale
 
         if hit_target:
-            verdict = TradeVerdict.RIGHT
-            analysis = (
-                f"Trade followed the ORB breakout plan accurately in {record.ticker}. "
-                "Target reached with required volume expansion and disciplined stop trailing."
-            )
-            lesson = f"In strong momentum breakouts for {record.ticker}, allowing price to reach 1.5x range height yields positive expectancy."
+            if is_net_profit:
+                verdict = TradeVerdict.RIGHT
+                analysis = (
+                    f"Trade followed the ORB breakout plan accurately in {record.ticker}. "
+                    f"Target was reached and produced net profit of PKR {record.net_pnl:+,.2f} "
+                    f"after absorbing round-trip slippage and brokerage fees."
+                )
+                lesson = (
+                    f"In strong momentum breakouts for {record.ticker}, allowing price to reach "
+                    "full target with sufficient friction buffer yields positive expectancy."
+                )
+            else:
+                verdict = TradeVerdict.RIGHT_FOR_WRONG_REASON
+                analysis = (
+                    f"Trade nominally hit target in {record.ticker}, but produced a net loss of "
+                    f"PKR {record.net_pnl:+,.2f} because round-trip transaction friction (brokerage commissions "
+                    "and slippage) exceeded the gross move. The profit target buffer was too narrow to overcome execution costs."
+                )
+                lesson = (
+                    "Profit target distance must substantially exceed round-trip execution friction "
+                    "(brokerage commissions and slippage); avoid narrow targets where transaction costs consume the entire move."
+                )
         elif hit_stop:
             verdict = TradeVerdict.WRONG_FOR_RIGHT_REASON
             analysis = (
-                f"Trade hit stop loss as defined. The setup complied with all ORB rules, "
-                "but market reversed into the opening range. Risk was properly capped at 1%."
+                f"Trade hit stop loss as planned in {record.ticker} (Net PnL: PKR {record.net_pnl:+,.2f}). "
+                "The setup complied with all ORB rules, but market reversed into the opening range. "
+                "Capital was protected by disciplined stop enforcement."
             )
-            lesson = "Taking a planned stop loss protects capital and proves disciplined execution; losses are regular business costs."
+            lesson = (
+                "Taking a planned stop loss protects capital and proves disciplined execution; "
+                "controlled losses are regular business costs."
+            )
+        elif hit_time_stop:
+            if is_net_profit:
+                verdict = TradeVerdict.RIGHT
+                analysis = (
+                    f"Trade closed at mandatory 15:20 PKT session cutoff in {record.ticker} "
+                    f"with net profit of PKR {record.net_pnl:+,.2f}. Discipline maintained with zero overnight risk."
+                )
+                lesson = "Mandatory intraday flat rules protect against overnight gap risk while locking in session gains."
+            else:
+                verdict = TradeVerdict.WRONG_FOR_RIGHT_REASON
+                analysis = (
+                    f"Trade closed at mandatory 15:20 PKT session cutoff in {record.ticker} "
+                    f"with net loss of PKR {record.net_pnl:+,.2f}. Flat discipline was honored, avoiding unhedged overnight exposure."
+                )
+                lesson = "Intraday discipline requires exiting at 15:20 PKT regardless of PnL to prevent unhedged overnight risk."
         else:
-            verdict = TradeVerdict.RIGHT if is_profit else TradeVerdict.WRONG
-            analysis = f"Position closed under session time rules ({record.exit_rationale}). Plan followed with no rule violations."
-            lesson = "Intraday discipline requires exiting before 15:20 PKT regardless of emotion."
+            if is_net_profit:
+                verdict = TradeVerdict.RIGHT
+                analysis = f"Position closed with net profit of PKR {record.net_pnl:+,.2f} on {record.ticker}."
+                lesson = "Adhering to trade rules and risk parameters ensures sustainable execution."
+            else:
+                verdict = TradeVerdict.WRONG
+                analysis = f"Position closed with net loss of PKR {record.net_pnl:+,.2f} on {record.ticker}."
+                lesson = "Review setup criteria and fee drag before committing capital to marginal setups."
 
         record.verdict = verdict
         record.post_mortem_analysis = analysis
@@ -264,9 +332,25 @@ class PostMortemEngine:
                 logger.error("invalid_verdict_returned", verdict=verdict_str)
                 return False
 
-            record.verdict = TradeVerdict(verdict_str)
-            record.post_mortem_analysis = data.get("analysis", "").strip()
-            record.transferable_lesson = data.get("transferable_lesson", "").strip()
+            parsed_verdict = TradeVerdict(verdict_str)
+            parsed_analysis = data.get("analysis", "").strip()
+            parsed_lesson = data.get("transferable_lesson", "").strip()
+
+            # Enforce hard invariant: Net loss trades cannot be 'Right'
+            if record.net_pnl <= 0 and parsed_verdict == TradeVerdict.RIGHT:
+                logger.warning("overriding_contradictory_verdict", trade_id=record.trade_id, old="Right", new="Right-for-wrong-reason")
+                parsed_verdict = TradeVerdict.RIGHT_FOR_WRONG_REASON
+
+            # Enforce hard invariant: Net loss trades cannot claim positive expectancy
+            if record.net_pnl <= 0 and parsed_lesson and "positive expectancy" in parsed_lesson.lower():
+                parsed_lesson = (
+                    "Profit target distance must substantially exceed round-trip execution friction "
+                    "(brokerage commissions and slippage); avoid narrow targets where transaction costs consume the entire move."
+                )
+
+            record.verdict = parsed_verdict
+            record.post_mortem_analysis = parsed_analysis
+            record.transferable_lesson = parsed_lesson
 
             if record.transferable_lesson:
                 self.lessons_memory.add_lesson(

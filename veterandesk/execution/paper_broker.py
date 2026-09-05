@@ -12,7 +12,7 @@ Key Features:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from enum import Enum
 from typing import Dict, List, Optional
 import uuid
@@ -182,6 +182,34 @@ class PaperBroker:
         return trade
 
 
+    @staticmethod
+    def evaluate_exit_condition(
+        trade: DemoTrade,
+        scraped_price: float,
+        current_time_pkt: Optional[time] = None,
+    ) -> Optional[ExitReason]:
+        """
+        Deterministically evaluates whether an open trade should exit based on market price and session cutoff.
+
+        Priority order:
+        1. Mandatory session cutoff (>= 15:20 PKT) -> TIME_STOP_1520 (mandatory intraday flat)
+        2. Stop loss breached (scraped_price <= trade.stop_loss) -> STOP_HIT
+        3. Target reached (scraped_price >= trade.target_price) -> TARGET_HIT
+        4. Otherwise -> None (continue holding)
+        """
+        if current_time_pkt is not None:
+            cutoff = time(15, 20)
+            if current_time_pkt >= cutoff:
+                return ExitReason.TIME_STOP_1520
+
+        if trade.stop_loss is not None and scraped_price <= trade.stop_loss:
+            return ExitReason.STOP_HIT
+
+        if trade.target_price is not None and scraped_price >= trade.target_price:
+            return ExitReason.TARGET_HIT
+
+        return None
+
     def execute_exit(
         self,
         trade_id: str,
@@ -191,12 +219,26 @@ class PaperBroker:
     ) -> DemoTrade:
         """
         Execute simulated trade exit with slippage and double-entry reconciliation.
+        Strictly validates that market price satisfies the specified exit condition.
         """
         ts = timestamp or datetime.now(timezone.utc)
         if trade_id not in self.open_trades:
             raise KeyError(f"Trade {trade_id} is not an open trade")
 
         trade = self.open_trades[trade_id]
+
+        # Strict validation: TARGET_HIT only fires when scraped market price reaches or exceeds target
+        if exit_reason == ExitReason.TARGET_HIT:
+            if trade.target_price is not None and scraped_price < trade.target_price:
+                raise ValueError(
+                    f"Cannot exit with TARGET_HIT: market price PKR {scraped_price:.2f} < target price PKR {trade.target_price:.2f}. "
+                    f"Target was never reached."
+                )
+        elif exit_reason == ExitReason.STOP_HIT:
+            if trade.stop_loss is not None and scraped_price > trade.stop_loss:
+                raise ValueError(
+                    f"Cannot exit with STOP_HIT: market price PKR {scraped_price:.2f} > stop loss PKR {trade.stop_loss:.2f}."
+                )
 
         # Apply slippage on SELL: price moves down against seller
         filled_exit_price = round(scraped_price * (1.0 - self.slippage_pct), 2)
