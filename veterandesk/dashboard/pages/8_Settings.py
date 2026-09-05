@@ -1,23 +1,48 @@
-"""Settings and Configuration Page."""
+"""Settings and Configuration Page - Connected to Live Supabase PostgreSQL."""
 
+from typing import Any, Dict, List
 import streamlit as st
 import json
 from veterandesk.config import settings, fee_structure
+from veterandesk.database.session import db_manager
 
 st.set_page_config(page_title="Settings | VeteranDesk", page_icon="⚙️", layout="wide")
 st.title("⚙️ System Configuration & Fee Schedule")
 
 st.markdown("> **Safety Note:** Risk limits are strictly capped and can only be tuned downward in code.")
 
-tab1, tab2, tab3 = st.tabs(["Risk Thresholds", "PSX Fee Table", "Watchlist"])
+client = db_manager.get_client()
+
+# Fetch live rules from Supabase
+db_rules: List[Dict[str, Any]] = []
+try:
+    res = client.table("rules_config").select("*").order("id", desc=True).limit(1).execute()
+    db_rules = res.data or []
+except Exception as ex:
+    st.warning(f"Could not load rules_config from Supabase: {ex}")
+
+tab1, tab2, tab3 = st.tabs(["Risk Thresholds (Supabase)", "PSX Fee Table", "Watchlist"])
 
 with tab1:
-    st.subheader("Hard Risk Parameters")
-    st.number_input("Max Risk Per Trade (%)", value=settings.max_risk_per_trade_pct, disabled=True, help="Hard-capped at 1.00%")
-    st.number_input("Max Daily Loss (%)", value=settings.max_daily_loss_pct, disabled=True, help="Triggers daily trading halt at 2.00%")
-    st.number_input("Max Intraday Trades Per Day", value=settings.max_intraday_trades_per_day, disabled=True)
-    st.time_input("Entry Cutoff Time (PKT)", value=settings.entry_cutoff_pkt, disabled=True)
-    st.time_input("Force Close Time (PKT)", value=settings.force_close_pkt, disabled=True)
+    st.subheader("Hard Risk Parameters (Enforced in Database & Code)")
+    if db_rules:
+        r = db_rules[0]
+        st.success(f"Loaded active config from Supabase rules_config (Version: {r.get('version', 'N/A')})")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Max Risk / Trade", f"{float(r.get('max_risk_pct_per_trade', 1.0)):.2f}%", help="Hard cap: 1.00%")
+        c2.metric("Daily Loss Halt", f"{float(r.get('max_daily_loss_pct', 2.0)):.2f}%", help="Triggers daily trading halt at 2.00%")
+        c3.metric("Max Intraday Trades", f"{int(r.get('max_intraday_trades_per_day', 3))}")
+
+        c4, c5, c6 = st.columns(3)
+        c4.metric("Entry Cutoff (PKT)", f"{r.get('entry_cutoff_time_pkt', '15:00:00')}")
+        c5.metric("Force Close (PKT)", f"{r.get('force_close_time_pkt', '15:20:00')}")
+        c6.metric("Max 20-day ADV %", f"{float(r.get('max_adv_pct', 5.0)):.2f}%")
+    else:
+        st.number_input("Max Risk Per Trade (%)", value=settings.max_risk_per_trade_pct, disabled=True, help="Hard-capped at 1.00%")
+        st.number_input("Max Daily Loss (%)", value=settings.max_daily_loss_pct, disabled=True, help="Triggers daily trading halt at 2.00%")
+        st.number_input("Max Intraday Trades Per Day", value=settings.max_intraday_trades_per_day, disabled=True)
+        st.time_input("Entry Cutoff Time (PKT)", value=settings.entry_cutoff_pkt, disabled=True)
+        st.time_input("Force Close Time (PKT)", value=settings.force_close_pkt, disabled=True)
 
 with tab2:
     st.subheader(f"Versioned Fee Structure: {fee_structure.version}")
@@ -33,3 +58,4 @@ with tab2:
 with tab3:
     st.subheader("Liquid Watchlist")
     st.write(settings.watchlist)
+

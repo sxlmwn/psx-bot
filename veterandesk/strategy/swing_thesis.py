@@ -114,12 +114,12 @@ class SwingThesisGenerator:
         capped_confidence = min(75, max(40, int(raw_confidence_pct)))
 
         # Lessons check: must cite at least one lesson if active lessons exist
-        active_lessons = self.lessons_memory.get_active_lessons()
+        active_lessons = self.lessons_memory.get_lessons_for_ticker(sym)
         cited: List[str] = applied_lessons or []
         if active_lessons and not cited:
-            # Auto-link top active lesson
+            # Auto-link top active lesson and persist citation
             top_lesson = active_lessons[0]
-            top_lesson.times_cited += 1
+            self.lessons_memory.cite_lesson(top_lesson)
             cited.append(f"[{top_lesson.category}] {top_lesson.lesson_text}")
 
         thesis = SwingThesis(

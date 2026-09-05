@@ -1,5 +1,6 @@
 """Demo Paper Account & Graduation Page - Connected to Live Supabase PostgreSQL."""
 
+from typing import Any, Dict, List
 import pandas as pd
 import streamlit as st
 
@@ -12,12 +13,12 @@ st.title("💼 Demo Account & Double-Entry Ledger")
 client = db_manager.get_client()
 
 # Fetch live ledger from Supabase
-ledger_entries = []
+ledger_entries: List[Dict[str, Any]] = []
 try:
     res_ledger = client.table("demo_ledger").select("*").order("id", desc=True).limit(100).execute()
     ledger_entries = res_ledger.data or []
-except Exception as e:
-    st.error(f"Failed to fetch ledger from Supabase: {e}")
+except Exception as err:
+    st.error(f"Failed to fetch ledger from Supabase: {err}")
 
 # Compute live balances from ledger entries
 cash_balance = settings.starting_balance_pkr
@@ -28,11 +29,11 @@ realized_pnl = 0.0
 
 if ledger_entries:
     # Sort chronologically to compute running totals
-    chronological = sorted(ledger_entries, key=lambda x: x["id"])
-    for e in chronological:
-        acct = e.get("account_name")
-        debit = float(e.get("debit", 0.0))
-        credit = float(e.get("credit", 0.0))
+    chronological = sorted(ledger_entries, key=lambda x: int(x["id"]))
+    for entry in chronological:
+        acct = entry.get("account_name")
+        debit = float(entry.get("debit", 0.0))
+        credit = float(entry.get("credit", 0.0))
         if acct == "CASH":
             cash_balance += (debit - credit)
         elif acct == "EQUITY_HOLDINGS":
@@ -62,12 +63,12 @@ st.subheader("🎓 Graduation Criteria Tracking (Live Code Enforcement)")
 st.caption("Graduation is calculated strictly by code and unlocks real-account trading.")
 
 # Fetch closed trades
-closed_trades = []
+closed_trades: List[Dict[str, Any]] = []
 try:
     res_trades = client.table("trades").select("*").eq("status", "CLOSED").execute()
     closed_trades = res_trades.data or []
-except Exception as e:
-    st.warning(f"Could not load closed trades for graduation tracking: {e}")
+except Exception as err:
+    st.warning(f"Could not load closed trades for graduation tracking: {err}")
 
 # Fetch mistakes
 violations_count = 0
@@ -78,8 +79,9 @@ except Exception:
     pass
 
 trades_count = len(closed_trades)
-winning_trades = sum(1 for t in closed_trades if float(t.get("net_pnl", 0) or 0) > 0)
-expectancy = sum(float(t.get("net_pnl", 0) or 0) for t in closed_trades) / max(1, trades_count)
+winning_trades = len([t for t in closed_trades if float(t.get("net_pnl", 0) or 0) > 0])
+total_pnl = sum([float(t.get("net_pnl", 0) or 0) for t in closed_trades], 0.0)
+expectancy = total_pnl / max(1, trades_count)
 
 g_col1, g_col2, g_col3, g_col4 = st.columns(4)
 g_col1.metric("Closed Trades", f"{trades_count} / {settings.graduation_min_trades}", help="Requires >= 30 closed trades")

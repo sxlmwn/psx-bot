@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import httpx
 
 from veterandesk.config import settings
@@ -90,7 +90,7 @@ class TelegramService:
         self,
         date_str: str,
         market_overview: str,
-        watchlist_summary: List[dict],
+        watchlist_summary: List[Dict[str, Any]],
         key_levels: Optional[List[str]] = None,
     ) -> str:
         """Format daily pre-market or morning briefing."""
