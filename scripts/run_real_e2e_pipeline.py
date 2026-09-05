@@ -144,6 +144,16 @@ def run_e2e_test():
         print("CRITICAL: Risk Engine rejected the trade! Execution halted.")
         sys.exit(1)
 
+    # Update signal with final risk-approved position size & status
+    signal.position_size = assessment.approved_shares
+    from veterandesk.strategy.models import SignalStatus
+    signal.status = SignalStatus.APPROVED
+    client.table("trade_signals").update({
+        "position_size": assessment.approved_shares,
+        "status": "APPROVED"
+    }).eq("signal_id", signal.signal_id).execute()
+    print(f"\n[Supabase] Updated trade_signals table with approved position_size={assessment.approved_shares} and status='APPROVED'.")
+
     # ---------------------------------------------------------
     # STAGE 3: DEMO ACCOUNT EXECUTION (PAPER BROKER)
     # ---------------------------------------------------------

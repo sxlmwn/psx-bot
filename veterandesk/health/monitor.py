@@ -104,7 +104,28 @@ class SystemHealthMonitor:
             else:
                 self.record_check("ledger", ComponentStatus.RED, lat, f"Ledger imbalance: {msg}")
 
+        self._persist_heartbeats_to_db(self.components)
         return self.components
+
+    def _persist_heartbeats_to_db(self, statuses: Dict[str, ComponentHealth]) -> None:
+        """Persist component health states into Supabase PostgreSQL."""
+        try:
+            from veterandesk.database.session import db_manager
+            client = db_manager.get_client()
+            rows = [
+                {
+                    "component": h.name,
+                    "status": h.status.value,
+                    "latency_ms": round(h.latency_ms, 2),
+                    "message": h.message,
+                    "checked_at": h.last_checked.isoformat(),
+                }
+                for h in statuses.values()
+            ]
+            client.table("health_heartbeats").insert(rows).execute()
+            logger.info("heartbeats_persisted_to_supabase", count=len(rows))
+        except Exception as e:
+            logger.warning("heartbeat_db_persistence_skipped", error=str(e))
 
     def is_system_down(self, threshold_seconds: int = 120) -> bool:
         """

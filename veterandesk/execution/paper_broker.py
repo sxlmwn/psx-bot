@@ -323,10 +323,15 @@ class PaperBroker:
                 "fee_version": trade.fee_version,
                 "session_id": trade.session_id,
             }
-            # Ensure trade_signals row exists before demo_trades references it (avoid FK violation)
+            # Ensure trade_signals row exists and has the approved position size
             try:
                 sig_check = client.table("trade_signals").select("signal_id").eq("signal_id", trade.signal_id).execute()
-                if not sig_check.data:
+                if sig_check.data:
+                    client.table("trade_signals").update({
+                        "position_size": int(trade.shares),
+                        "status": "APPROVED"
+                    }).eq("signal_id", trade.signal_id).execute()
+                else:
                     rr = round((trade.target_price - trade.entry_price) / max(0.01, trade.entry_price - trade.stop_loss), 2)
                     client.table("trade_signals").insert({
                         "signal_id": trade.signal_id,
@@ -347,7 +352,7 @@ class PaperBroker:
                         "session_id": trade.session_id
                     }).execute()
             except Exception as se:
-                logger.warning("signal_fk_preseed_skipped", error=str(se))
+                logger.warning("signal_fk_sync_skipped", error=str(se))
 
             # Upsert into trades and demo_trades tables in Supabase
             client.table("trades").upsert(record).execute()

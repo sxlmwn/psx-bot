@@ -138,8 +138,30 @@ class MistakeDetector:
                 rules=[m.rule_violated for m in mistakes],
             )
             self.audit_log.extend(mistakes)
+            self._persist_mistakes_to_db(mistakes)
 
         return mistakes
+
+    def _persist_mistakes_to_db(self, mistakes: List[DetectedMistake]) -> None:
+        """Persist detected discipline mistakes into Supabase PostgreSQL."""
+        try:
+            from veterandesk.database.session import db_manager
+            client = db_manager.get_client()
+            rows = [
+                {
+                    "trade_id": m.trade_id,
+                    "rule_violated": m.rule_violated,
+                    "severity": m.severity.value,
+                    "details": m.details,
+                    "detected_at": m.detected_at.isoformat(),
+                    "acknowledged": False,
+                }
+                for m in mistakes
+            ]
+            client.table("mistake_audit_log").insert(rows).execute()
+            logger.info("mistakes_persisted_to_supabase", count=len(rows))
+        except Exception as e:
+            logger.warning("mistake_db_persistence_skipped", error=str(e))
 
     def verify_no_discrepancy(
         self,

@@ -94,6 +94,7 @@ class PostMortemEngine:
             retry_count=0,
         )
         self.pending_queue.append(record)
+        self._persist_journal_record(record)
         logger.info("post_mortem_queued", trade_id=trade.trade_id, ticker=trade.ticker)
         return record
 
@@ -115,20 +116,56 @@ class PostMortemEngine:
                     record.status = PostMortemStatus.COMPLETED
                     record.completed_at = datetime.now(timezone.utc)
                     self.completed_journal[record.trade_id] = record
+                    self._persist_journal_record(record)
                     processed += 1
                 else:
                     record.retry_count += 1
                     if record.retry_count >= 5:
                         record.status = PostMortemStatus.FAILED
                         logger.error("post_mortem_max_retries_exceeded", trade_id=record.trade_id)
+                    self._persist_journal_record(record)
                     remaining.append(record)
             except Exception as e:
                 record.retry_count += 1
                 logger.error("post_mortem_error", trade_id=record.trade_id, error=str(e))
+                self._persist_journal_record(record)
                 remaining.append(record)
 
         self.pending_queue = remaining
         return processed
+
+    def _persist_journal_record(self, record: JournalRecord) -> None:
+        """Persist trade journal and verdict to live Supabase PostgreSQL."""
+        try:
+            from veterandesk.database.session import db_manager
+            client = db_manager.get_client()
+            row = {
+                "trade_id": record.trade_id,
+                "market_conditions": record.market_conditions,
+                "entry_rationale": record.entry_rationale,
+                "exit_rationale": record.exit_rationale,
+                "verdict": record.verdict.value if record.verdict else None,
+                "post_mortem_status": record.status.value,
+                "post_mortem_analysis": record.post_mortem_analysis,
+                "transferable_lesson": record.transferable_lesson,
+                "user_annotation": record.user_annotation,
+                "retry_count": record.retry_count,
+                "created_at": record.created_at.isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            client.table("trade_journal").upsert(row, on_conflict="trade_id").execute()
+            if record.status == PostMortemStatus.COMPLETED and record.transferable_lesson:
+                client.table("lessons_memory").insert({
+                    "trade_id": record.trade_id,
+                    "category": f"ORB_{record.ticker}",
+                    "lesson_text": record.transferable_lesson,
+                    "is_active": True,
+                    "times_cited": 0,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }).execute()
+            logger.info("journal_persisted_to_supabase", trade_id=record.trade_id, status=record.status.value)
+        except Exception as e:
+            logger.warning("journal_db_persistence_skipped", error=str(e))
 
     async def _generate_post_mortem(self, record: JournalRecord) -> bool:
         """

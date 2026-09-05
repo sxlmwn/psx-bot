@@ -86,6 +86,70 @@ class TelegramService:
         )
         return text
 
+    def format_daily_brief(
+        self,
+        date_str: str,
+        market_overview: str,
+        watchlist_summary: List[dict],
+        key_levels: Optional[List[str]] = None,
+    ) -> str:
+        """Format daily pre-market or morning briefing."""
+        wl_lines = []
+        for item in watchlist_summary:
+            ticker = item.get("ticker", "N/A")
+            last_price = item.get("price", 0.0)
+            change_pct = item.get("change_pct", 0.0)
+            sign = "+" if change_pct >= 0 else ""
+            wl_lines.append(f"  • `{ticker:<6}`: PKR {last_price:>7.2f} ({sign}{change_pct:.2f}%)")
+        wl_text = "\n".join(wl_lines) if wl_lines else "  • No watchlist updates."
+
+        levels_text = ""
+        if key_levels:
+            levels_text = "\n📍 *Key Support/Resistance:*\n" + "\n".join(f"  • {l}" for l in key_levels)
+
+        text = (
+            f"🌅 *VETERANDESK DAILY BRIEF — {date_str}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 *Market Overview:*\n{market_overview.strip()}\n\n"
+            f"📋 *Focus Watchlist:*\n{wl_text}"
+            f"{levels_text}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ _Discipline Rule: Max 1.0% risk/trade | Cutoff: 15:00 PKT_"
+        )
+        return text
+
+    def format_session_summary(
+        self,
+        session_date: str,
+        trades_count: int,
+        winning_trades: int,
+        losing_trades: int,
+        gross_pnl: float,
+        total_fees: float,
+        net_pnl: float,
+        discipline_violations: int = 0,
+        ending_cash: float = 500000.0,
+    ) -> str:
+        """Format post-market end-of-session summary."""
+        win_rate = (winning_trades / trades_count * 100.0) if trades_count > 0 else 0.0
+        pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
+        sign = "+" if net_pnl >= 0 else ""
+
+        text = (
+            f"🔔 *VETERANDESK SESSION SUMMARY — {session_date}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• *Trades Executed:* `{trades_count}` (Cap: 3)\n"
+            f"• *Win / Loss:* `{winning_trades}W / {losing_trades}L` (Win Rate: `{win_rate:.1f}%`)\n"
+            f"• *Gross P&L:* `PKR {gross_pnl:>+10,.2f}`\n"
+            f"• *Fees & Taxes Paid:* `PKR {total_fees:>10,.2f}`\n"
+            f"• *Net P&L:* {pnl_emoji} `PKR {sign}{net_pnl:>10,.2f}`\n"
+            f"• *Closing Cash:* `PKR {ending_cash:>10,.2f}`\n"
+            f"• *Discipline Breaches:* `{discipline_violations}` {'✅ (Clean)' if discipline_violations == 0 else '⚠️ (Flagged)'}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 _Status: All positions closed prior to 15:20 PKT force cutoff._"
+        )
+        return text
+
     def enqueue_message(self, msg_type: MessageType, text: str) -> OutboundMessage:
         """Enqueue message for delivery."""
         import uuid

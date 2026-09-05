@@ -173,6 +173,8 @@ def create_test_trade(req: Optional[TestTradeRequest] = None) -> Dict[str, Any]:
             }
         )
 
+    sig.position_size = assessment.approved_shares
+    sig.status = SignalStatus.APPROVED
     shares_to_execute = min(params.shares, assessment.approved_shares)
     trade = broker.execute_buy(
         signal=sig,
@@ -275,6 +277,9 @@ def execute_trade_pipeline(req: ExecuteTradeRequest) -> Dict[str, Any]:
                 "rule_results": [{"rule": r.rule_name, "passed": r.passed, "reason": r.reason} for r in assessment.rule_results]
             }
         )
+
+    sig.position_size = assessment.approved_shares
+    sig.status = SignalStatus.APPROVED
 
     trade = broker.execute_buy(
         signal=sig,
