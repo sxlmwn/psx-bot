@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     # Database (Supabase PostgreSQL / SQLite fallback)
     database_url: str = Field(default="sqlite+aiosqlite:///./veterandesk.db", alias="DATABASE_URL")
     supabase_url: Optional[str] = Field(default=None, alias="SUPABASE_URL")
+    supabase_anon_key: Optional[str] = Field(default=None, alias="SUPABASE_ANON_KEY")
+    supabase_service_role_key: Optional[str] = Field(default=None, alias="SUPABASE_SERVICE_ROLE_KEY")
     supabase_key: Optional[str] = Field(default=None, alias="SUPABASE_KEY")
 
     # Scraper & DPS Market Data

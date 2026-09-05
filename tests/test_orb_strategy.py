@@ -199,3 +199,85 @@ class TestORBGoldenScenarios:
             assert sig.target_price == exp_target, f"Day {day_idx} Target mismatch"
             assert sig.reward_risk_ratio >= 1.0
             assert 40 <= sig.confidence_pct <= 75
+
+
+class TestRealPSXGoldenData:
+    """
+    Golden tests using REAL historical intraday tick & candle data
+    pulled directly from the PSX DPS timeseries endpoint.
+    """
+
+    @pytest.fixture(scope="module")
+    def real_psx_data(self):
+
+        import json
+        from pathlib import Path
+        fixture_path = Path(__file__).parent / "fixtures" / "psx_real_market_data.json"
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_real_psx_ogdc_breakout(self, real_psx_data):
+        """OGDC (2026-09-04): 15-min range 327.00 - 328.00. Breakout triggered at 09:41 PKT."""
+        candles = real_psx_data["OGDC"]
+        assert len(candles) >= 15
+
+        # Compute range manually
+        rh = max(c["high"] for c in candles[:15])
+        rl = min(c["low"] for c in candles[:15])
+        assert rh == 328.00
+        assert rl == 327.00
+        avg_vol = sum(c["volume"] for c in candles[:15]) / 15.0
+        req_vol = avg_vol * 1.5
+
+        sig = compute_orb_signal("OGDC", candles, fixed_signal_id="REAL_OGDC_20260904")
+        assert sig is not None
+        assert sig.ticker == "OGDC"
+        assert sig.action == SignalAction.BUY
+        assert sig.entry_price == 328.48
+        assert sig.stop_loss == 327.00  # Range low
+        assert sig.target_price == 329.98  # 328.48 + 1.5 * 1.00
+        assert sig.reward_risk_ratio == 1.01
+        assert sig.confidence_pct == 75
+
+    def test_real_psx_hubc_breakout(self, real_psx_data):
+        """HUBC (2026-09-04): 15-min range 205.66 - 207.00. Breakout triggered at 11:37 PKT."""
+        candles = real_psx_data["HUBC"]
+        sig = compute_orb_signal("HUBC", candles, fixed_signal_id="REAL_HUBC_20260904")
+        assert sig is not None
+        assert sig.ticker == "HUBC"
+        assert sig.action == SignalAction.BUY
+        assert sig.entry_price == 207.30
+        assert sig.stop_loss == 205.66
+        assert sig.target_price == 209.31
+        assert sig.reward_risk_ratio == 1.23
+
+    def test_real_psx_hbl_no_breakout(self, real_psx_data):
+        """HBL (2026-09-04): 15-min range 313.52 - 316.00. No post-range breakout."""
+        candles = real_psx_data["HBL"]
+        sig = compute_orb_signal("HBL", candles, fixed_signal_id="REAL_HBL_20260904")
+        assert sig is None
+
+    def test_real_psx_engro_no_breakout(self, real_psx_data):
+        """ENGRO (2026-09-04): 15-min range 482.00 - 496.00. No post-range breakout."""
+        candles = real_psx_data["ENGRO"]
+        sig = compute_orb_signal("ENGRO", candles, fixed_signal_id="REAL_ENGRO_20260904")
+        assert sig is None
+
+    def test_real_psx_eod_data_fixture_integrity(self):
+        """Verify 10 days of real EOD PSX timeseries fixtures for OGDC and HBL."""
+        import json
+        from pathlib import Path
+        eod_path = Path(__file__).parent / "fixtures" / "psx_real_eod_data.json"
+        with open(eod_path, "r", encoding="utf-8") as f:
+            eod_data = json.load(f)
+
+        assert "OGDC" in eod_data
+        assert "HBL" in eod_data
+        assert len(eod_data["OGDC"]) == 10
+        assert len(eod_data["HBL"]) == 10
+        # Check latest date is 2026-09-04
+        assert eod_data["OGDC"][0]["date"] == "2026-09-04"
+        assert eod_data["OGDC"][0]["close"] == 328.8
+        assert eod_data["HBL"][0]["date"] == "2026-09-04"
+        assert eod_data["HBL"][0]["close"] == 313.68
+

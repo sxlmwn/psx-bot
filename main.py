@@ -39,6 +39,12 @@ def run_tests() -> None:
     ])
 
 
+def run_migrate() -> None:
+    from veterandesk.database.migration import run_migration
+    logger.info("running_database_schema_migration")
+    run_migration()
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "api"
     if cmd == "api":
@@ -47,6 +53,9 @@ if __name__ == "__main__":
         run_dashboard()
     elif cmd == "test":
         run_tests()
+    elif cmd == "migrate":
+        run_migrate()
     else:
         print(f"Unknown command: {cmd}")
-        print("Valid commands: api | dashboard | test")
+        print("Valid commands: api | dashboard | test | migrate")
+
