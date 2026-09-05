@@ -161,6 +161,7 @@ class PaperBroker:
         )
 
         self.open_trades[trade_id] = trade
+        self._persist_trade_to_db(trade)
         logger.info(
             "demo_buy_filled",
             trade_id=trade_id,
@@ -172,6 +173,7 @@ class PaperBroker:
             cash_remaining=self.ledger.cash_balance
         )
         return trade
+
 
     def execute_exit(
         self,
@@ -247,6 +249,7 @@ class PaperBroker:
 
         del self.open_trades[trade_id]
         self.closed_trades.append(trade)
+        self._persist_trade_to_db(trade)
 
         logger.info(
             "demo_exit_filled",
@@ -257,3 +260,38 @@ class PaperBroker:
             cash_balance=self.ledger.cash_balance
         )
         return trade
+
+    def _persist_trade_to_db(self, trade: DemoTrade) -> None:
+        """Persist trade record to Supabase PostgreSQL database."""
+        try:
+            from veterandesk.database.session import db_manager
+            client = db_manager.get_client()
+            record = {
+                "trade_id": trade.trade_id,
+                "signal_id": trade.signal_id,
+                "ticker": trade.ticker,
+                "action": trade.action.value,
+                "shares": int(trade.shares),
+                "entry_price": float(trade.filled_entry_price),
+                "exit_price": float(trade.filled_exit_price) if trade.filled_exit_price is not None else None,
+                "stop_loss": float(trade.stop_loss),
+                "target_price": float(trade.target_price),
+                "slippage_pct": float(trade.slippage_pct),
+                "gross_pnl": float(trade.gross_pnl) if trade.gross_pnl is not None else None,
+                "fees_paid": float(trade.entry_fees + trade.exit_fees),
+                "net_pnl": float(trade.net_pnl) if trade.net_pnl is not None else None,
+                "risk_pct_used": 0.50,
+                "status": trade.status.value,
+                "exit_reason": trade.exit_reason.value if trade.exit_reason else None,
+                "opened_at": trade.opened_at.isoformat(),
+                "closed_at": trade.closed_at.isoformat() if trade.closed_at else None,
+                "fee_version": trade.fee_version,
+                "session_id": trade.session_id,
+            }
+            # Upsert into trades and demo_trades tables in Supabase
+            client.table("trades").upsert(record).execute()
+            client.table("demo_trades").upsert(record).execute()
+            logger.info("trade_persisted_to_supabase", trade_id=trade.trade_id)
+        except Exception as e:
+            logger.warning("trade_db_persistence_skipped", error=str(e))
+

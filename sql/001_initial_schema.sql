@@ -205,3 +205,45 @@ CREATE TABLE IF NOT EXISTS health_heartbeats (
 );
 
 CREATE INDEX IF NOT EXISTS idx_health_component_time ON health_heartbeats(component, checked_at DESC);
+
+-- 13. Trades Table (Primary production/demo trade record)
+CREATE TABLE IF NOT EXISTS trades (
+    id BIGSERIAL PRIMARY KEY,
+    trade_id VARCHAR(64) NOT NULL UNIQUE,
+    signal_id VARCHAR(64),
+    ticker VARCHAR(16) NOT NULL,
+    action VARCHAR(8) NOT NULL CHECK (action IN ('BUY', 'SELL')),
+    shares INT NOT NULL CHECK (shares > 0),
+    entry_price NUMERIC(12, 4) NOT NULL CHECK (entry_price > 0),
+    exit_price NUMERIC(12, 4) CHECK (exit_price IS NULL OR exit_price > 0),
+    stop_loss NUMERIC(12, 4) NOT NULL CHECK (stop_loss > 0 AND stop_loss < entry_price),
+    target_price NUMERIC(12, 4) NOT NULL CHECK (target_price > entry_price),
+    slippage_pct NUMERIC(6, 4) NOT NULL DEFAULT 0.0020,
+    gross_pnl NUMERIC(14, 4),
+    fees_paid NUMERIC(14, 4) NOT NULL DEFAULT 0,
+    net_pnl NUMERIC(14, 4),
+    risk_pct_used NUMERIC(5, 2) NOT NULL CHECK (risk_pct_used <= 1.00),
+    status VARCHAR(16) NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'CLOSED', 'CANCELLED')),
+    exit_reason VARCHAR(32) CHECK (exit_reason IN ('TARGET_HIT', 'STOP_HIT', 'TIME_STOP_1520', 'MANUAL', 'HALT')),
+    opened_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+    closed_at TIMESTAMPTZ,
+    fee_version VARCHAR(32) NOT NULL DEFAULT 'PSX_STANDARD_v1',
+    session_id VARCHAR(64) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_ticker_time ON trades(ticker, opened_at DESC);
+
+-- 14. Remote SQL Execution Helper (callable via service_role key RPC)
+CREATE OR REPLACE FUNCTION exec_sql(query text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    EXECUTE query;
+    RETURN jsonb_build_object('status', 'success');
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object('status', 'error', 'message', SQLERRM);
+END;
+$$;
+

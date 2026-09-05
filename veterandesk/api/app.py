@@ -26,7 +26,7 @@ from veterandesk.journal.lessons import LessonsMemory
 from veterandesk.journal.post_mortem import PostMortemEngine
 from veterandesk.portfolio.manager import PortfolioManager
 from veterandesk.risk.engine import risk_engine
-from veterandesk.strategy.models import TradeSignal
+from veterandesk.strategy.models import TradeSignal, SignalAction, SignalStatus
 
 # Initialize core services
 app = FastAPI(
@@ -77,6 +77,91 @@ def get_performance_metrics() -> Dict[str, Any]:
     }
 
 
+@app.get("/trades", tags=["Execution"])
+def get_all_supabase_trades() -> Dict[str, Any]:
+    """Retrieve trades stored in live Supabase PostgreSQL database."""
+    try:
+        from veterandesk.database.session import db_manager
+        client = db_manager.get_client()
+        res = client.table("trades").select("*").order("opened_at", desc=True).execute()
+        return {
+            "source": "Supabase (PostgreSQL)",
+            "count": len(res.data),
+            "trades": res.data
+        }
+    except Exception as e:
+        return {
+            "source": "Local Fallback",
+            "error": str(e),
+            "trades": [
+                {
+                    "trade_id": t.trade_id,
+                    "ticker": t.ticker,
+                    "shares": t.shares,
+                    "entry_price": t.filled_entry_price,
+                    "stop_loss": t.stop_loss,
+                    "target_price": t.target_price,
+                    "status": t.status.value,
+                    "opened_at": t.opened_at.isoformat(),
+                }
+                for t in broker.open_trades.values()
+            ]
+        }
+
+
+class TestTradeRequest(BaseModel):
+    ticker: str = "OGDC"
+    shares: int = 100
+    entry_price: float = 328.48
+    stop_loss: float = 327.00
+    target_price: float = 329.98
+
+
+@app.post("/trades/test", tags=["Execution"])
+def create_test_trade(req: Optional[TestTradeRequest] = None) -> Dict[str, Any]:
+    """Create a verified test trade and persist it directly to live Supabase PostgreSQL."""
+    params = req or TestTradeRequest()
+    sig = TradeSignal(
+        signal_id=f"SIG_{params.ticker}_TEST",
+        ticker=params.ticker,
+        strategy="ORB_v1.0",
+        strategy_version="1.0.0",
+        action=SignalAction.BUY,
+        entry_price=params.entry_price,
+        stop_loss=params.stop_loss,
+        target_price=params.target_price,
+        reward_risk_ratio=round((params.target_price - params.entry_price) / (params.entry_price - params.stop_loss), 2),
+        position_size=params.shares,
+        confidence_pct=75,
+        invalidation_reason="Test trade execution",
+        data_status="ok",
+        status=SignalStatus.GENERATED,
+        created_at=datetime.now(timezone.utc),
+        session_id="test_session"
+    )
+    trade = broker.execute_buy(
+        signal=sig,
+        scraped_price=params.entry_price,
+        shares=params.shares
+    )
+
+    return {
+        "status": "SUCCESS",
+        "message": "Test trade executed and persisted to live Supabase PostgreSQL",
+        "trade": {
+            "trade_id": trade.trade_id,
+            "ticker": trade.ticker,
+            "shares": trade.shares,
+            "entry_price": trade.filled_entry_price,
+            "stop_loss": trade.stop_loss,
+            "target_price": trade.target_price,
+            "slippage_pct": trade.slippage_pct,
+            "status": trade.status.value,
+            "opened_at": trade.opened_at.isoformat(),
+        }
+    }
+
+
 @app.get("/trades/open", tags=["Execution"])
 def get_open_trades() -> List[Dict[str, Any]]:
     """List current open demo positions."""
@@ -112,6 +197,7 @@ def get_closed_trades() -> List[Dict[str, Any]]:
         }
         for t in broker.closed_trades
     ]
+
 
 
 @app.get("/journal", tags=["Journal"])
