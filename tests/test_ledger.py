@@ -17,7 +17,7 @@ from veterandesk.strategy.models import SignalAction, TradeSignal
 class TestDoubleEntryLedger:
     def test_single_buy_and_sell_reconciliation(self):
         ledger = DoubleEntryLedger(starting_balance_pkr=500000.0)
-        broker = PaperBroker(ledger=ledger, slippage_pct=0.0020)
+        broker = PaperBroker(ledger=ledger, slippage_pct=0.0020, persist_to_db=False)
 
         sig = TradeSignal(
             signal_id="SIG_TEST",
@@ -77,7 +77,7 @@ class TestDoubleEntryLedger:
 
     def test_insufficient_funds_rejected(self):
         ledger = DoubleEntryLedger(starting_balance_pkr=10000.0)  # Low balance
-        broker = PaperBroker(ledger=ledger)
+        broker = PaperBroker(ledger=ledger, persist_to_db=False)
 
         sig = TradeSignal(
             signal_id="SIG_BIG",
@@ -104,7 +104,7 @@ class TestDoubleEntryLedger:
         random.seed(42)  # Deterministic seed for reproducible tests
         starting_cash = 10000000.0  # 10M PKR to support 1,000 sequential trades
         ledger = DoubleEntryLedger(starting_balance_pkr=starting_cash)
-        broker = PaperBroker(ledger=ledger, slippage_pct=0.0020)
+        broker = PaperBroker(ledger=ledger, slippage_pct=0.0020, persist_to_db=False)
 
         tickers = ["OGDC", "PPL", "ENGRO", "LUCK", "HUBC", "MCB", "SYS", "TRG"]
 

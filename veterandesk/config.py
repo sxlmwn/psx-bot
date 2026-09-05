@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     session_id: str = "dev_session_1"
     app_name: str = "VeteranDesk"
     app_version: str = "1.0.0"
+    enable_debug_endpoints: bool = Field(default=False, alias="ENABLE_DEBUG_ENDPOINTS")
 
     # Database (Supabase PostgreSQL / SQLite fallback)
     database_url: str = Field(default="sqlite+aiosqlite:///./veterandesk.db", alias="DATABASE_URL")

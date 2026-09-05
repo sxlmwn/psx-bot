@@ -70,7 +70,7 @@ class TestCrashRecoveryAndPersistence:
         Verify that executing the same signal twice does not double-fill or duplicate.
         """
         ledger = DoubleEntryLedger(starting_balance_pkr=500000.0)
-        broker = PaperBroker(ledger=ledger)
+        broker = PaperBroker(ledger=ledger, persist_to_db=False)
 
         sig = TradeSignal(
             signal_id="SIG_UNIQUE_1",

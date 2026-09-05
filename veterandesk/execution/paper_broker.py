@@ -77,9 +77,15 @@ class PaperBroker:
     Simulated broker for demo paper trading with complete accounting integration.
     """
 
-    def __init__(self, ledger: DoubleEntryLedger, slippage_pct: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        ledger: DoubleEntryLedger,
+        slippage_pct: Optional[float] = None,
+        persist_to_db: bool = True,
+    ) -> None:
         self.ledger: DoubleEntryLedger = ledger
         self.slippage_pct: float = slippage_pct or fee_structure.default_slippage_pct
+        self.persist_to_db: bool = persist_to_db
         self.open_trades: Dict[str, DemoTrade] = {}
         self.closed_trades: List[DemoTrade] = []
 
@@ -152,7 +158,7 @@ class PaperBroker:
             (AccountType.CASH, 0.0, total_cash_outflow),
         ]
 
-        self.ledger.record_transaction(
+        entries = self.ledger.record_transaction(
             transaction_id=tx_id,
             trade_id=trade_id,
             description=f"BUY {shares} {signal.ticker} @ {filled_price:.2f} (Slip: {self.slippage_pct*100:.2f}%)",
@@ -162,6 +168,7 @@ class PaperBroker:
 
         self.open_trades[trade_id] = trade
         self._persist_trade_to_db(trade)
+        self._persist_ledger_entries_to_db(entries)
         logger.info(
             "demo_buy_filled",
             trade_id=trade_id,
@@ -230,7 +237,7 @@ class PaperBroker:
         else:
             items.append((AccountType.REALIZED_PNL, abs(gross_pnl), 0.0))
 
-        self.ledger.record_transaction(
+        entries = self.ledger.record_transaction(
             transaction_id=tx_id,
             trade_id=trade_id,
             description=f"EXIT {trade.shares} {trade.ticker} @ {filled_exit_price:.2f} ({exit_reason.value})",
@@ -250,6 +257,7 @@ class PaperBroker:
         del self.open_trades[trade_id]
         self.closed_trades.append(trade)
         self._persist_trade_to_db(trade)
+        self._persist_ledger_entries_to_db(entries)
 
         logger.info(
             "demo_exit_filled",
@@ -261,8 +269,35 @@ class PaperBroker:
         )
         return trade
 
+    def _persist_ledger_entries_to_db(self, entries: List[Any]) -> None:
+        """Persist double-entry ledger records to Supabase PostgreSQL."""
+        if not self.persist_to_db:
+            return
+        try:
+            from veterandesk.database.session import db_manager
+            client = db_manager.get_client()
+            records = [
+                {
+                    "transaction_id": e.transaction_id,
+                    "trade_id": e.trade_id,
+                    "account_name": e.account.value,
+                    "debit": float(e.debit),
+                    "credit": float(e.credit),
+                    "balance_after": float(e.balance_after),
+                    "description": e.description,
+                    "created_at": e.created_at.isoformat()
+                }
+                for e in entries
+            ]
+            client.table("demo_ledger").insert(records).execute()
+            logger.info("ledger_persisted_to_supabase", count=len(records))
+        except Exception as e:
+            logger.warning("ledger_db_persistence_skipped", error=str(e))
+
     def _persist_trade_to_db(self, trade: DemoTrade) -> None:
         """Persist trade record to Supabase PostgreSQL database."""
+        if not self.persist_to_db:
+            return
         try:
             from veterandesk.database.session import db_manager
             client = db_manager.get_client()
@@ -288,6 +323,32 @@ class PaperBroker:
                 "fee_version": trade.fee_version,
                 "session_id": trade.session_id,
             }
+            # Ensure trade_signals row exists before demo_trades references it (avoid FK violation)
+            try:
+                sig_check = client.table("trade_signals").select("signal_id").eq("signal_id", trade.signal_id).execute()
+                if not sig_check.data:
+                    rr = round((trade.target_price - trade.entry_price) / max(0.01, trade.entry_price - trade.stop_loss), 2)
+                    client.table("trade_signals").insert({
+                        "signal_id": trade.signal_id,
+                        "ticker": trade.ticker,
+                        "strategy": "ORB_v1.0",
+                        "strategy_version": "1.0.0",
+                        "action": trade.action.value,
+                        "entry_price": float(trade.entry_price),
+                        "stop_loss": float(trade.stop_loss),
+                        "target_price": float(trade.target_price),
+                        "reward_risk_ratio": max(1.0, rr),
+                        "position_size": int(trade.shares),
+                        "confidence_pct": 75,
+                        "invalidation_reason": "Automated trade execution",
+                        "data_status": "ok",
+                        "status": "APPROVED",
+                        "created_at": trade.opened_at.isoformat(),
+                        "session_id": trade.session_id
+                    }).execute()
+            except Exception as se:
+                logger.warning("signal_fk_preseed_skipped", error=str(se))
+
             # Upsert into trades and demo_trades tables in Supabase
             client.table("trades").upsert(record).execute()
             client.table("demo_trades").upsert(record).execute()

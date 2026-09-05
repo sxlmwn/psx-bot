@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from veterandesk.config import settings
 from veterandesk.execution.graduation import compute_performance_metrics
@@ -119,8 +119,19 @@ class TestTradeRequest(BaseModel):
 
 @app.post("/trades/test", tags=["Execution"])
 def create_test_trade(req: Optional[TestTradeRequest] = None) -> Dict[str, Any]:
-    """Create a verified test trade and persist it directly to live Supabase PostgreSQL."""
+    """
+    Debug test trade endpoint.
+    GATED: Impossible to reach in production unless ENABLE_DEBUG_ENDPOINTS=true.
+    ENFORCED: Strictly passes through Risk Engine pipeline before any execution.
+    """
+    if not settings.enable_debug_endpoints:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Debug endpoint disabled in production. Set ENABLE_DEBUG_ENDPOINTS=true in non-production environments to enable."
+        )
+
     params = req or TestTradeRequest()
+    rr = round((params.target_price - params.entry_price) / max(0.01, params.entry_price - params.stop_loss), 2)
     sig = TradeSignal(
         signal_id=f"SIG_{params.ticker}_TEST",
         ticker=params.ticker,
@@ -130,7 +141,7 @@ def create_test_trade(req: Optional[TestTradeRequest] = None) -> Dict[str, Any]:
         entry_price=params.entry_price,
         stop_loss=params.stop_loss,
         target_price=params.target_price,
-        reward_risk_ratio=round((params.target_price - params.entry_price) / (params.entry_price - params.stop_loss), 2),
+        reward_risk_ratio=rr,
         position_size=params.shares,
         confidence_pct=75,
         invalidation_reason="Test trade execution",
@@ -139,15 +150,45 @@ def create_test_trade(req: Optional[TestTradeRequest] = None) -> Dict[str, Any]:
         created_at=datetime.now(timezone.utc),
         session_id="test_session"
     )
+
+    from veterandesk.config import PKT_TZ
+    now_pkt = datetime.now(PKT_TZ).time()
+    assessment = risk_engine.evaluate_signal(
+        signal=sig,
+        account_balance=ledger.cash_balance,
+        current_day_realized_loss=abs(min(0.0, ledger.realized_pnl)),
+        trades_executed_today=len(broker.closed_trades) + len(broker.open_trades),
+        current_time_pkt=now_pkt,
+        twenty_day_adv=5000000.0,
+        open_positions=[{"ticker": t.ticker, "shares": t.shares} for t in broker.open_trades.values()],
+    )
+
+    if not assessment.is_approved:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "Trade rejected by Risk Engine",
+                "rejection_reasons": assessment.rejection_reasons,
+                "rule_results": [{"rule": r.rule_name, "passed": r.passed, "reason": r.reason} for r in assessment.rule_results]
+            }
+        )
+
+    shares_to_execute = min(params.shares, assessment.approved_shares)
     trade = broker.execute_buy(
         signal=sig,
         scraped_price=params.entry_price,
-        shares=params.shares
+        shares=shares_to_execute
     )
 
     return {
         "status": "SUCCESS",
-        "message": "Test trade executed and persisted to live Supabase PostgreSQL",
+        "message": "Trade validated by Risk Engine and executed into live Supabase PostgreSQL",
+        "risk_assessment": {
+            "is_approved": assessment.is_approved,
+            "approved_shares": assessment.approved_shares,
+            "risk_pct_used": assessment.risk_pct_used,
+            "rules_checked": len(assessment.rule_results)
+        },
         "trade": {
             "trade_id": trade.trade_id,
             "ticker": trade.ticker,
@@ -156,6 +197,105 @@ def create_test_trade(req: Optional[TestTradeRequest] = None) -> Dict[str, Any]:
             "stop_loss": trade.stop_loss,
             "target_price": trade.target_price,
             "slippage_pct": trade.slippage_pct,
+            "status": trade.status.value,
+            "opened_at": trade.opened_at.isoformat(),
+        }
+    }
+
+
+class ExecuteTradeRequest(BaseModel):
+    ticker: str
+    action: SignalAction = SignalAction.BUY
+    entry_price: float
+    stop_loss: float
+    target_price: float
+    twenty_day_adv: float = 5000000.0
+    confidence_pct: int = 75
+    invalidation_reason: str = "Breakout invalidated"
+    strategy: str = "ORB_v1.0"
+    strategy_version: str = "1.0.0"
+
+    @field_validator("stop_loss")
+    @classmethod
+    def validate_stop_loss(cls, v: float, info: Any) -> float:
+        entry = info.data.get("entry_price")
+        action = info.data.get("action", SignalAction.BUY)
+        if entry is not None and action == SignalAction.BUY and v >= entry:
+            raise ValueError(f"For BUY signals, stop_loss ({v}) must be strictly less than entry_price ({entry})")
+        return v
+
+
+@app.post("/trades/execute", tags=["Execution"])
+def execute_trade_pipeline(req: ExecuteTradeRequest) -> Dict[str, Any]:
+    """
+    Production trade execution pipeline.
+    Non-negotiable rule: Every trade MUST pass through Risk & Discipline Engine before execution.
+    """
+    rr = round((req.target_price - req.entry_price) / max(0.01, req.entry_price - req.stop_loss), 2)
+    try:
+        sig = TradeSignal(
+            signal_id=f"SIG_{req.ticker}_{int(datetime.now(timezone.utc).timestamp())}",
+            ticker=req.ticker,
+            strategy=req.strategy,
+            strategy_version=req.strategy_version,
+            action=req.action,
+            entry_price=req.entry_price,
+            stop_loss=req.stop_loss,
+            target_price=req.target_price,
+            reward_risk_ratio=max(1.0, rr),
+            position_size=1,
+            confidence_pct=req.confidence_pct,
+            invalidation_reason=req.invalidation_reason,
+            data_status="ok",
+            status=SignalStatus.GENERATED,
+            created_at=datetime.now(timezone.utc),
+            session_id=settings.session_id
+        )
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid signal specification: {e}")
+
+    from veterandesk.config import PKT_TZ
+    now_pkt = datetime.now(PKT_TZ).time()
+    assessment = risk_engine.evaluate_signal(
+        signal=sig,
+        account_balance=ledger.cash_balance,
+        current_day_realized_loss=abs(min(0.0, ledger.realized_pnl)),
+        trades_executed_today=len(broker.closed_trades) + len(broker.open_trades),
+        current_time_pkt=now_pkt,
+        twenty_day_adv=req.twenty_day_adv,
+        open_positions=[{"ticker": t.ticker, "shares": t.shares} for t in broker.open_trades.values()],
+    )
+
+    if not assessment.is_approved:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "Trade rejected by Risk Engine",
+                "rejection_reasons": assessment.rejection_reasons,
+                "rule_results": [{"rule": r.rule_name, "passed": r.passed, "reason": r.reason} for r in assessment.rule_results]
+            }
+        )
+
+    trade = broker.execute_buy(
+        signal=sig,
+        scraped_price=req.entry_price,
+        shares=assessment.approved_shares
+    )
+
+    return {
+        "status": "APPROVED_AND_EXECUTED",
+        "risk_assessment": {
+            "approved_shares": assessment.approved_shares,
+            "risk_pct_used": assessment.risk_pct_used,
+            "rules_checked": len(assessment.rule_results)
+        },
+        "trade": {
+            "trade_id": trade.trade_id,
+            "ticker": trade.ticker,
+            "shares": trade.shares,
+            "entry_price": trade.filled_entry_price,
+            "stop_loss": trade.stop_loss,
+            "target_price": trade.target_price,
             "status": trade.status.value,
             "opened_at": trade.opened_at.isoformat(),
         }

@@ -246,12 +246,14 @@ def calculate_position_size(
     entry_price: float,
     stop_loss: float,
     risk_pct: float = 1.00,
-    lot_size: int = 1
+    lot_size: int = 1,
+    cap_by_cash: bool = True,
 ) -> int:
     """
     Position sizing formula:
     shares = floor((account * risk%) / (entry - stop))
     Rounded down to lot rules (e.g. multiples of lot_size).
+    Capped by available cash balance to prevent unbacked margin overdrafts.
     """
     if account_balance <= 0 or entry_price <= stop_loss or risk_pct <= 0:
         return 0
@@ -260,6 +262,12 @@ def calculate_position_size(
     per_share_risk = entry_price - stop_loss
 
     raw_shares = math.floor(rupee_budget / per_share_risk)
+
+    if cap_by_cash and entry_price > 0:
+        # Reserve 1% buffer for execution slippage and PSX transaction fees (commission + regulatory)
+        max_cash_shares = math.floor((account_balance * 0.99) / entry_price)
+        raw_shares = min(raw_shares, max_cash_shares)
+
     if lot_size > 1:
         raw_shares = (raw_shares // lot_size) * lot_size
 
