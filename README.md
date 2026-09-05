@@ -21,7 +21,7 @@ VeteranDesk is an autonomous trading agent designed to operate with the discipli
 
 ### ✅ Fully Met Acceptance Criteria (10 of 12)
 
-1. **Criterion #1 (Operational Core) — Scraper Sustained Reliability (<90s Latency):**
+1. **Criterion #1 — Scraper Sustained Reliability (<90s Latency):**
    - Verified sustained live polling across real PSX tickers (`OGDC`, `HBL`, `HUBC`) over 10 consecutive poll cycles with 0 failures, 0 gaps, and average latency of ~1.4s (well below the 90s ceiling).
 2. **Criterion #2 — Impossible to Trade Without a Stop-Loss:**
    - Enforced at the database constraint level (`CHECK (stop_loss < entry_price)` and `NOT NULL` in PostgreSQL) and at the code domain level (`StopLossRequiredError`).
@@ -29,31 +29,44 @@ VeteranDesk is an autonomous trading agent designed to operate with the discipli
    - Hard 2% daily loss limit halts all trading, persisted immediately to Supabase `daily_halts` and re-read on startup to survive process crashes.
 4. **Criterion #4 — Position Sizing Matches All Boundary Cases:**
    - 100% unit test coverage validating mathematical sizing (1% risk limit, liquidity caps, zero-volume edge cases, and tick sizing).
-5. **Criterion #5 (Mathematical Core) — Double-Entry Ledger Reconciles After Every Fill:**
-   - Verified across 1,000 randomized simulated fills with exactly **0.00 drift** between cash and equity ledger entries.
-6. **Criterion #6 — Every Closed Trade Has a Post-Mortem or Pending Status:**
+5. **Criterion #6 — Every Closed Trade Has a Post-Mortem or Pending Status:**
    - Outbound queue and retry mechanism guarantee that all closed trades receive one of 4 discrete verdicts (`Right`, `Wrong`, `Right-for-wrong-reason`, `Wrong-for-right-reason`) or stay in a persistent pending state.
-7. **Criterion #7 — Lessons Cited in Subsequent Setups:**
+6. **Criterion #7 — Lessons Cited in Subsequent Setups:**
    - Active lessons memory indexes past trade lessons, injects them into pre-market theses, and tracks live citation counts (`times_cited`) in Supabase.
-8. **Criterion #8 — Telegram Signal Delivery with Schema Validation:**
+7. **Criterion #8 — Telegram Signal Delivery with Schema Validation:**
    - Telegram bot formats alerts strictly; schemas prohibit None or empty values, and an outbound queue handles retries within 60s.
-9. **Criterion #9 — Health Monitor Detects Outages Within 2 Minutes:**
+8. **Criterion #9 — Health Monitor Detects Outages Within 2 Minutes:**
    - 60-second heartbeat check triggers a critical alert when any subsystem (scraper, DB, scheduler, Telegram) is silent for >120 seconds.
-10. **Criterion #10 — Crash-Recovery Passes 3 Times Consecutively:**
-    - `tests/test_crash_recovery.py` executed three consecutive times with a **100% pass rate** on all 3 runs.
-11. **Criterion #11 — Test Suite Green & Mypy Strict Clean:**
-    - 81/81 tests pass, 85% overall coverage, 100% Risk Engine coverage, and 0 `mypy --strict` errors.
+9. **Criterion #10 — Crash-Recovery Passes 3 Times Consecutively:**
+   - `tests/test_crash_recovery.py` executed three consecutive times with a **100% pass rate** on all 3 runs.
+10. **Criterion #11 — Test Suite Green & Mypy Strict Clean:**
+    - 81/81 tests pass, 85% overall coverage, 100% Risk Engine coverage, and 0 `mypy --strict` errors across 47 source files.
 
 ---
 
-### ⏳ Structurally Scheduled Post-Submission Criteria (Calendar-Time Dependent)
+### ⏳ Structurally Scheduled Post-Submission Criteria (2 of 12)
 
 These two items require multi-day market calendar time beyond a weekend build and are structurally implemented, scheduled, and ready to run during the live evaluation window:
 
-1. **Criterion #12 — 10-Day Shadow Run Without Unhandled Exceptions:**
+1. **Criterion #5 — Ledger Reconciles After Every Fill (10-Session Live Zero-Mismatch):**
+   - **Underlying Math 100% Verified:** The double-entry bookkeeping engine reconciles after every single fill with exactly **0.00 drift**. Tested in `tests/test_ledger.py::TestDoubleEntryLedger::test_one_thousand_simulated_fills_reconciliation`:
+     ```text
+     --- 1,000 SIMULATED FILLS AUDIT RESULTS ---
+     Starting Cash:                                10,000,000.00 PKR
+     Total Buys Executed:                          500
+     Total Exits Executed:                         500
+     Total Fills:                                  1,000
+     Total Ledger Journal Entries:                 4,500
+     Total Debits:                                 66,568,009.60 PKR
+     Total Credits:                                66,568,009.60 PKR
+     Intermediate Reconciliation Drift Failures:   0 / 1,000 fills
+     Audit From Scratch OK:                        True
+     Audit Difference (Debits - Credits):          0.000000 PKR
+     Audit Status Message:                         All ledger accounts match recomputed totals.
+     ```
+   - **Outstanding Calendar Requirement:** Only the accumulation of 10 live market calendar sessions on PSX remains to fulfill the multi-session duration requirement; the core reconciliation engine is fully functioning and verified.
+2. **Criterion #12 — 10-Day Shadow Run Without Unhandled Exceptions:**
    - Requires 10 consecutive live market trading sessions on PSX. The full pipeline (scraper, risk engine, execution, journal, health monitor) is live and ready for autonomous execution.
-2. **Criterion #5 (Multi-Session Tracking) — 10-Session Live Ledger Zero-Mismatch:**
-   - While mathematical ledger integrity is verified over 1,000 fills, 10 consecutive live market session reconciliations will accumulate naturally alongside the 10-day shadow run.
 
 ---
 
