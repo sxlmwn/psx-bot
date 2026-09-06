@@ -239,11 +239,15 @@ class TestCoverageExpansion:
         from veterandesk.market_data.candle_builder import Candle
         from veterandesk.strategy.orb import compute_orb_signal
 
+        from veterandesk.alerts.discord import discord_service
+
         # Scheduler failure handling
-        with patch.object(telegram_service, "send_daily_brief", side_effect=RuntimeError("Simulated brief fail")):
+        with patch.object(telegram_service, "send_daily_brief", side_effect=RuntimeError("Simulated brief fail")), \
+             patch.object(discord_service, "send_daily_brief", side_effect=RuntimeError("Simulated discord brief fail")):
             assert run_daily_brief_job() is False
 
-        with patch.object(telegram_service, "send_session_summary", side_effect=RuntimeError("Simulated summary fail")):
+        with patch.object(telegram_service, "send_session_summary", side_effect=RuntimeError("Simulated summary fail")), \
+             patch.object(discord_service, "send_session_summary", side_effect=RuntimeError("Simulated discord summary fail")):
             assert run_session_summary_job() is False
 
         # ORB notify=True coverage
