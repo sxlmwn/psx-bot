@@ -46,6 +46,12 @@ def run_migrate() -> None:
 
 
 if __name__ == "__main__":
+    import streamlit as st
+    if st.runtime.exists():
+        import runpy
+        runpy.run_path("veterandesk/dashboard/Home.py", run_name="__main__")
+        sys.exit(0)
+
     cmd = sys.argv[1] if len(sys.argv) > 1 else "api"
     if cmd == "api":
         run_api()

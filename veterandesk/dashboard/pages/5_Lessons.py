@@ -1,4 +1,12 @@
-"""Lessons Memory Page - Connected to Live Supabase PostgreSQL."""
+import sys
+from pathlib import Path
+
+# Ensure project root is on sys.path
+_project_root = Path(__file__).resolve().parent
+while _project_root.parent != _project_root and not (_project_root / "veterandesk").is_dir():
+    _project_root = _project_root.parent
+if (_project_root / "veterandesk").is_dir() and str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 from typing import Any, Dict, List
 import pandas as pd

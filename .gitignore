@@ -12,6 +12,7 @@ __pycache__/
 .coverage
 htmlcov/
 .mypy_cache/
+*.egg-info/
 
 # Local Environment Secrets & Databases
 .env
