@@ -153,6 +153,18 @@ class MistakeDetector:
                 except Exception as ex:
                     logger.warning("telegram_mistake_alert_failed", error=str(ex), trade_id=m.trade_id)
 
+                try:
+                    from veterandesk.alerts.discord import discord_service
+                    discord_service.send_mistake_alert(
+                        rule_violated=m.rule_violated,
+                        severity=m.severity.value,
+                        trade_id=m.trade_id,
+                        details=m.details,
+                        detected_at_str=m.detected_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    )
+                except Exception as ex:
+                    logger.warning("discord_mistake_alert_failed", error=str(ex), trade_id=m.trade_id)
+
         return mistakes
 
     def _persist_mistakes_to_db(self, mistakes: List[DetectedMistake]) -> None:
@@ -201,6 +213,17 @@ class MistakeDetector:
                 )
             except Exception as ex:
                 logger.warning("telegram_discrepancy_alert_failed", error=str(ex))
+
+            try:
+                from veterandesk.alerts.discord import discord_service
+                discord_service.send_mistake_alert(
+                    rule_violated=f"AUDIT_DISCREPANCY_{violations}",
+                    severity="CRITICAL",
+                    trade_id=audit_mistakes[0].trade_id if audit_mistakes else None,
+                    details=alert_msg,
+                )
+            except Exception as ex:
+                logger.warning("discord_discrepancy_alert_failed", error=str(ex))
             return False, alert_msg
 
         return True, None

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from veterandesk.alerts.discord import discord_service
 from veterandesk.alerts.telegram import telegram_service
 from veterandesk.config import PKT_TZ, settings
 from veterandesk.logging import get_logger
@@ -43,18 +44,32 @@ def run_daily_brief_job(
         "Volume filter: 1.5x minimum expansion required for breakout validity",
     ]
 
+    t_ok = False
+    d_ok = False
+
     try:
-        success = telegram_service.send_daily_brief(
+        t_ok = telegram_service.send_daily_brief(
             date_str=today_str,
             market_overview=overview,
             watchlist_summary=watchlist_data,
             key_levels=key_levels,
         )
-        logger.info("daily_brief_job_dispatched", date=today_str, success=success)
-        return success
+        logger.info("telegram_daily_brief_job_dispatched", date=today_str, success=t_ok)
     except Exception as e:
-        logger.error("daily_brief_job_failed", error=str(e), date=today_str)
-        return False
+        logger.error("telegram_daily_brief_job_failed", error=str(e), date=today_str)
+
+    try:
+        d_ok = discord_service.send_daily_brief(
+            date_str=today_str,
+            market_overview=overview,
+            watchlist_summary=watchlist_data,
+            key_levels=key_levels,
+        )
+        logger.info("discord_daily_brief_job_dispatched", date=today_str, success=d_ok)
+    except Exception as e:
+        logger.error("discord_daily_brief_job_failed", error=str(e), date=today_str)
+
+    return t_ok or d_ok
 
 
 def run_session_summary_job(
@@ -74,8 +89,11 @@ def run_session_summary_job(
     now_pkt = datetime.now(PKT_TZ)
     date_str = session_date or now_pkt.strftime("%Y-%m-%d")
 
+    t_ok = False
+    d_ok = False
+
     try:
-        success = telegram_service.send_session_summary(
+        t_ok = telegram_service.send_session_summary(
             session_date=date_str,
             trades_count=trades_count,
             winning_trades=winning_trades,
@@ -86,11 +104,27 @@ def run_session_summary_job(
             discipline_violations=discipline_violations,
             ending_cash=ending_cash,
         )
-        logger.info("session_summary_job_dispatched", date=date_str, success=success)
-        return success
+        logger.info("telegram_session_summary_job_dispatched", date=date_str, success=t_ok)
     except Exception as e:
-        logger.error("session_summary_job_failed", error=str(e), date=date_str)
-        return False
+        logger.error("telegram_session_summary_job_failed", error=str(e), date=date_str)
+
+    try:
+        d_ok = discord_service.send_session_summary(
+            session_date=date_str,
+            trades_count=trades_count,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            gross_pnl=gross_pnl,
+            total_fees=total_fees,
+            net_pnl=net_pnl,
+            discipline_violations=discipline_violations,
+            ending_cash=ending_cash,
+        )
+        logger.info("discord_session_summary_job_dispatched", date=date_str, success=d_ok)
+    except Exception as e:
+        logger.error("discord_session_summary_job_failed", error=str(e), date=date_str)
+
+    return t_ok or d_ok
 
 
 def create_alert_scheduler(

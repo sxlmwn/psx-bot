@@ -83,7 +83,7 @@ veterandesk/
 ├── portfolio/             # Real-portfolio position planning with mandatory stop-loss enforcement
 ├── journal/               # Trade journal with 4-verdict post-mortems (Groq openai/gpt-oss-120b) & active lessons memory
 ├── audit/                 # Independent Mistake Detection & discrepancy audit engine
-├── alerts/                # Telegram notifications with outbound retry queue & schema validation
+├── alerts/                # Telegram & Discord webhook notifications with retry engine, rate-limiting & schema validation
 ├── health/                # 60-second system heartbeat & component outage monitor
 ├── api/                   # FastAPI backend REST application
 └── dashboard/             # Streamlit multi-page trading desk
@@ -119,7 +119,7 @@ cp .env.example .env
 ```bash
 python main.py test
 ```
-*Current test suite:* **81 passed tests**, **85% overall test coverage**, **100% Risk Engine coverage**, **`mypy --strict` clean (0 errors)**, **1,000-fill Double-Entry Ledger reconciliation verified**, **Crash-Recovery suite passed 3x consecutively**.
+*Current test suite:* **116 passed tests**, **`mypy --strict` clean (0 errors across 52 source files)**, **1,000-fill Double-Entry Ledger reconciliation verified**, **Crash-Recovery suite passed 3x consecutively**.
 
 ### 3. Launch FastAPI Backend
 ```bash
@@ -131,6 +131,15 @@ python main.py api
 ```bash
 python main.py dashboard
 # Access dashboard in browser at http://localhost:8501
+```
+
+### 5. Verify Real Alerts (Standalone Delivery Tests)
+```bash
+# Verify Telegram Bot Delivery
+python scripts/test_telegram_send.py
+
+# Verify Discord Webhook Delivery
+python scripts/test_discord_send.py
 ```
 
 ---
@@ -147,7 +156,9 @@ python main.py dashboard
 | **Portfolio & Post-Mortem** | Mandatory stops, 4 verdicts, graduation | **100% Pass (4/4)** |
 | **FastAPI REST Service** | Endpoints for health, ledger, journal | **100% Pass (4/4)** |
 | **Crash Recovery Suite** | State persistence across sudden restarts | **Passed (3x in a row)** |
-| **Coverage & Type Safety** | ≥85% test coverage + strict static types | **85% Coverage, 0 Mypy Errors** |
+| **Telegram Bot Delivery** | 8 templates, 3x retry backoff, outbox logging | **100% Pass (19/19)** |
+| **Discord Webhook Delivery** | Rich embeds, HTTP 429 rate limit, decoupled dispatch | **100% Pass (17/17)** |
+| **Coverage & Type Safety** | ≥85% test coverage + strict static types | **116 Tests Pass, 0 Mypy Errors** |
 
 ---
 

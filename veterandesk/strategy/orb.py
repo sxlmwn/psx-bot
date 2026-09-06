@@ -153,6 +153,16 @@ def compute_orb_signal(
                 except Exception:
                     pass
 
+                try:
+                    from veterandesk.alerts.discord import discord_service
+                    discord_service.send_signal_alert(
+                        signal=sig,
+                        shares=100,  # Provisional size until risk engine evaluates
+                        reason_lines=f"ORB breakout on {volume_multiplier}x volume expansion.\nInvalidation: {sig.invalidation_reason}",
+                    )
+                except Exception:
+                    pass
+
             return sig
 
     return None

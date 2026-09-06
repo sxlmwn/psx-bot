@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, field_validator
 
+from veterandesk.alerts.discord import discord_service
 from veterandesk.alerts.scheduler import create_alert_scheduler
 from veterandesk.alerts.telegram import telegram_service
 from veterandesk.config import settings
@@ -215,6 +216,15 @@ def create_test_trade(req: Optional[TestTradeRequest] = None) -> Dict[str, Any]:
     except Exception as ex:
         logger.warning("telegram_signal_alert_failed", error=str(ex), signal_id=sig.signal_id)
 
+    try:
+        discord_service.send_signal_alert(
+            signal=sig,
+            shares=shares_to_execute,
+            reason_lines=f"ORB breakout approved by Risk Engine.\nRisk allocated: {assessment.risk_pct_used:.2f}% equity.",
+        )
+    except Exception as ex:
+        logger.warning("discord_signal_alert_failed", error=str(ex), signal_id=sig.signal_id)
+
     return {
         "status": "SUCCESS",
         "message": "Trade validated by Risk Engine and executed into live Supabase PostgreSQL",
@@ -328,6 +338,15 @@ def execute_trade_pipeline(req: ExecuteTradeRequest) -> Dict[str, Any]:
         )
     except Exception as ex:
         logger.warning("telegram_signal_alert_failed", error=str(ex), signal_id=sig.signal_id)
+
+    try:
+        discord_service.send_signal_alert(
+            signal=sig,
+            shares=assessment.approved_shares,
+            reason_lines=f"ORB breakout approved by Risk Engine.\nRisk allocated: {assessment.risk_pct_used:.2f}% equity.",
+        )
+    except Exception as ex:
+        logger.warning("discord_signal_alert_failed", error=str(ex), signal_id=sig.signal_id)
 
     return {
         "status": "APPROVED_AND_EXECUTED",

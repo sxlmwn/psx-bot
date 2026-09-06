@@ -21,7 +21,7 @@ try:
 except Exception as ex:
     st.warning(f"Could not load rules_config from Supabase: {ex}")
 
-tab1, tab2, tab3, tab4 = st.tabs(["Risk Thresholds (Supabase)", "PSX Fee Table", "Watchlist", "Telegram Alerts"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Risk Thresholds (Supabase)", "PSX Fee Table", "Watchlist", "Telegram Alerts", "Discord Alerts"])
 
 with tab1:
     st.subheader("Hard Risk Parameters (Enforced in Database & Code)")
@@ -98,5 +98,45 @@ with tab4:
         "- **Persistence:** Every outbound alert logged to `telegram_delivery_log` (Supabase PostgreSQL / SQLite fallback).\n"
         "- **Discipline Schedule:** Daily Brief at `9:15 AM PKT`, Session Summary at `3:45 PM PKT`."
     )
+
+with tab5:
+    st.subheader("💬 Discord Webhook Alerts & Outbound Queue")
+    from veterandesk.alerts.discord import get_discord_delivery_stats
+    d_stats = get_discord_delivery_stats()
+
+    dm1, dm2, dm3, dm4, dm5 = st.columns(5)
+    dm1.metric("Total Dispatched", d_stats["total"])
+    dm2.metric("Delivered (Sent)", d_stats["sent"])
+    dm3.metric("Pending In-Flight", d_stats["pending"])
+    d_skipped_count = d_stats.get("skipped", 0)
+    dm4.metric(
+        "Skipped / Mock",
+        d_skipped_count,
+        delta="⚠️ Unconfigured" if d_skipped_count > 0 else "0 Skipped",
+        delta_color="inverse" if d_skipped_count > 0 else "normal",
+        help="Alerts skipped because Discord webhook URL is missing/disabled",
+    )
+    dm5.metric("Failed (Retries Exhausted)", d_stats["failed"], delta="Clean" if d_stats["failed"] == 0 else "Needs Review", delta_color="normal" if d_stats["failed"] == 0 else "inverse")
+
+    webhook_configured = bool(settings.discord_webhook_url and str(settings.discord_webhook_url).strip())
+    d_is_live = bool(settings.discord_enabled and webhook_configured)
+
+    if d_is_live:
+        st.success("🟢 **Discord Delivery Active**: Webhook URL is configured. Rich embed alerts will be transmitted.")
+    else:
+        st.warning(
+            "⚠️ **Discord Delivery Disabled / Offline**: Alerts are logged with status `skipped` instead of being sent. "
+            "To enable live delivery, configure `DISCORD_WEBHOOK_URL` and `DISCORD_ENABLED=true` in `.env`."
+        )
+
+    st.markdown("### Delivery Engine Guarantees")
+    st.markdown(
+        "- **Format:** Discord Rich Embeds with color badges (Green: Buy / Target, Red: Sell / Stop, Dark Red: Loss Halt, Orange: Mistake, Purple: Graduation).\n"
+        "- **Retry Policy:** Up to 3 attempts with exponential backoff (`0.5s`, `1.0s`, `2.0s`).\n"
+        "- **Rate Limit Aware:** Honors Discord HTTP 429 `retry_after` responses.\n"
+        "- **Persistence:** Every outbound alert logged to `discord_delivery_log` (Supabase PostgreSQL / SQLite fallback).\n"
+        "- **Discipline Schedule:** Daily Brief at `9:15 AM PKT`, Session Summary at `3:45 PM PKT`."
+    )
+
 
 

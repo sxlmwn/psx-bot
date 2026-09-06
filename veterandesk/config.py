@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     telegram_chat_id: Optional[str] = Field(default=None, alias="TELEGRAM_CHAT_ID")
     telegram_enabled: bool = Field(default=True, alias="TELEGRAM_ENABLED")
 
+    # Discord
+    discord_webhook_url: Optional[str] = Field(default=None, alias="DISCORD_WEBHOOK_URL")
+    discord_enabled: bool = Field(default=True, alias="DISCORD_ENABLED")
+
     # Health Heartbeat
     heartbeat_interval_seconds: int = 60
     max_missed_heartbeat_seconds: int = 120

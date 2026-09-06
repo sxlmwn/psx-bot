@@ -317,6 +317,21 @@ class PaperBroker:
             except Exception as ex:
                 logger.warning("telegram_level_hit_alert_failed", error=str(ex), trade_id=trade.trade_id)
 
+            # Discord alert on level hit / position closed
+            try:
+                from veterandesk.alerts.discord import discord_service
+                discord_service.send_level_hit_alert(
+                    ticker=trade.ticker,
+                    trade_id=trade.trade_id,
+                    level_type=exit_reason.value,
+                    price=scraped_price,
+                    fill_price=filled_exit_price,
+                    net_pnl=net_trade_pnl,
+                    closed_at_str=ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                )
+            except Exception as ex:
+                logger.warning("discord_level_hit_alert_failed", error=str(ex), trade_id=trade.trade_id)
+
             # Telegram alert on graduation eligibility check
             try:
                 from veterandesk.execution.graduation import compute_performance_metrics, notify_graduation_status

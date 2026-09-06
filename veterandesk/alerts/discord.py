@@ -1,13 +1,13 @@
 """
-Telegram Alerts and Signal Broadcast Service.
+Discord Alerts and Webhook Notification Service.
 
-Robustness features:
+Features:
 1. Outbound delivery with exponential backoff and retry (up to 3 attempts).
-2. Schema-validated message templates (strictly prevents None or blank renders).
-3. Persistent DB delivery tracking in `telegram_delivery_log` (pending -> sent / failed).
-4. Rate-limit aware throttling (max 1 msg/sec per chat).
+2. Rate-limit aware handling (respects Discord HTTP 429 retry_after).
+3. Schema-validated rich embeds for all 8 notification types.
+4. Persistent DB delivery tracking in `discord_delivery_log` (pending -> sent / failed / skipped).
 5. Async and synchronous delivery support.
-6. Graceful offline/disabled mode when credentials are not configured.
+6. Graceful offline/disabled mode when webhook URL is unconfigured.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
+import json
 import os
 import time
 from typing import Any, Dict, List, Optional
@@ -23,6 +23,7 @@ import uuid
 import httpx
 from sqlalchemy import text
 
+from veterandesk.alerts.telegram import DeliveryStatus, MessageType
 from veterandesk.alerts.validators import (
     validate_daily_brief,
     validate_daily_loss_halt,
@@ -37,33 +38,24 @@ from veterandesk.config import settings
 from veterandesk.logging import get_logger
 from veterandesk.strategy.models import TradeSignal
 
-logger = get_logger("veterandesk.telegram")
+logger = get_logger("veterandesk.discord")
 
 
-class MessageType(str, Enum):
-    SIGNAL = "SIGNAL"
-    LEVEL_HIT = "LEVEL_HIT"
-    DAILY_HALT = "DAILY_HALT"
-    MISTAKE_VIOLATION = "MISTAKE_VIOLATION"
-    GRADUATION_STATUS = "GRADUATION_STATUS"
-    SYSTEM_HEALTH = "SYSTEM_HEALTH"
-    DAILY_BRIEF = "DAILY_BRIEF"
-    SESSION_SUMMARY = "SESSION_SUMMARY"
-    ALERT = "ALERT"
-
-
-class DeliveryStatus(str, Enum):
-    PENDING = "pending"
-    SENT = "sent"
-    FAILED = "failed"
-    SKIPPED = "skipped"
+# Discord embed colors (hex integers)
+COLOR_GREEN = 0x2ECC71
+COLOR_RED = 0xE74C3C
+COLOR_DARK_RED = 0x992D22
+COLOR_ORANGE = 0xE67E22
+COLOR_PURPLE = 0x9B59B6
+COLOR_BLUE = 0x3498DB
 
 
 @dataclass
-class OutboundMessage:
+class DiscordOutboundMessage:
     id: str
     msg_type: MessageType
-    text: str
+    content: Optional[str] = None
+    embeds: List[Dict[str, Any]] = field(default_factory=list)
     status: DeliveryStatus = DeliveryStatus.PENDING
     attempts: int = 0
     max_attempts: int = 3
@@ -83,64 +75,83 @@ class OutboundMessage:
     def delivered_at(self, dt: Optional[datetime]) -> None:
         self.sent_at = dt
 
+    @property
+    def payload_dict(self) -> Dict[str, Any]:
+        p: Dict[str, Any] = {}
+        if self.content:
+            p["content"] = self.content
+        if self.embeds:
+            p["embeds"] = self.embeds
+        return p
 
-class TelegramService:
+    @property
+    def payload_json(self) -> str:
+        return json.dumps(self.payload_dict)
+
+
+class DiscordService:
     """
-    Robust Telegram notification service with retry with backoff, rate limiting,
-    schema-validated templates, and persistent database delivery tracking.
+    Robust Discord notification service using incoming webhooks, rich embeds,
+    exponential retry backoff, HTTP 429 rate-limit awareness, and DB persistence.
     """
 
     def __init__(
         self,
-        bot_token: Optional[str] = None,
-        chat_id: Optional[str] = None,
+        webhook_url: Optional[str] = None,
         enabled: Optional[bool] = None,
     ) -> None:
-        # Read strictly from environment variables or settings, allowing explicit parameter overrides
-        self.bot_token = bot_token if bot_token is not None else (settings.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN"))
-        self.chat_id = chat_id if chat_id is not None else (settings.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID"))
-        
-        env_enabled = settings.telegram_enabled
+        self.webhook_url: Optional[str] = (
+            webhook_url
+            if webhook_url is not None
+            else (settings.discord_webhook_url or os.environ.get("DISCORD_WEBHOOK_URL"))
+        )
+
+        env_enabled = settings.discord_enabled
         if enabled is not None:
             self.enabled = enabled
         else:
-            self.enabled = bool(env_enabled and self.bot_token and self.chat_id)
+            self.enabled = bool(env_enabled and self.webhook_url and self.webhook_url.strip())
 
-        self.outbound_queue: List[OutboundMessage] = []
-        self.delivered_history: List[OutboundMessage] = []
-        self.failed_dead_letter: List[OutboundMessage] = []
-        self.skipped_history: List[OutboundMessage] = []
+        self.outbound_queue: List[DiscordOutboundMessage] = []
+        self.delivered_history: List[DiscordOutboundMessage] = []
+        self.failed_dead_letter: List[DiscordOutboundMessage] = []
+        self.skipped_history: List[DiscordOutboundMessage] = []
         self.last_send_timestamp: float = 0.0
-        self.min_interval_seconds: float = 1.0  # Respect 1 msg/sec Telegram rate limit
 
     # =========================================================================
-    # MESSAGE TEMPLATES (SCHEMA-VALIDATED — ZERO NONE / BLANK RENDERS)
+    # EMBED BUILDERS & TEMPLATES (SCHEMA-VALIDATED)
     # =========================================================================
 
-    def format_signal_message(self, signal: TradeSignal, shares: int, reason_lines: str) -> str:
-        """Format and validate trade signal notification."""
+    def format_signal_embed(self, signal: TradeSignal, shares: int, reason_lines: str) -> Dict[str, Any]:
+        """Format and validate trade signal Discord embed."""
         validate_signal(signal, shares, reason_lines)
 
+        is_buy = str(signal.action.value).upper() == "BUY"
+        color = COLOR_GREEN if is_buy else COLOR_RED
 
-        text = (
-            f"🎯 *VETERANDESK TRADE SIGNAL*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"• *Ticker:* `{signal.ticker.upper()}`\n"
-            f"• *Action:* `{signal.action.value}`\n"
-            f"• *Quantity:* `{shares:,} shares`\n"
-            f"• *Entry:* `PKR {signal.entry_price:.2f}`\n"
-            f"• *Stop-Loss:* `PKR {signal.stop_loss:.2f}`\n"
-            f"• *Target:* `PKR {signal.target_price:.2f}`\n"
-            f"• *Reward/Risk:* `{signal.reward_risk_ratio:.2f}:1`\n"
-            f"• *Confidence:* `{signal.confidence_pct}%`\n"
-            f"• *Strategy:* `{signal.strategy}`\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"📝 *Rationale:*\n{reason_lines.strip()}\n"
-            f"⏱ _Time: {signal.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}_"
-        )
-        return text
+        fields = [
+            {"name": "Action", "value": f"**{signal.action.value}**", "inline": True},
+            {"name": "Ticker", "value": f"`{signal.ticker.upper()}`", "inline": True},
+            {"name": "Quantity", "value": f"{shares:,} shares", "inline": True},
+            {"name": "Entry Price", "value": f"PKR {signal.entry_price:.2f}", "inline": True},
+            {"name": "Stop-Loss", "value": f"PKR {signal.stop_loss:.2f}", "inline": True},
+            {"name": "Target Price", "value": f"PKR {signal.target_price:.2f}", "inline": True},
+            {"name": "Reward / Risk", "value": f"{signal.reward_risk_ratio:.2f}:1", "inline": True},
+            {"name": "Confidence", "value": f"{signal.confidence_pct}%", "inline": True},
+            {"name": "Strategy", "value": f"`{signal.strategy}`", "inline": True},
+            {"name": "Rationale", "value": reason_lines.strip(), "inline": False},
+        ]
 
-    def format_level_hit_message(
+        embed = {
+            "title": f"🎯 TRADE SIGNAL — {signal.ticker.upper()}",
+            "color": color,
+            "fields": fields,
+            "timestamp": signal.created_at.isoformat(),
+            "footer": {"text": "VeteranDesk PSX Trading Agent • Signal Engine"},
+        }
+        return embed
+
+    def format_level_hit_embed(
         self,
         ticker: str,
         trade_id: str,
@@ -149,82 +160,98 @@ class TelegramService:
         fill_price: float,
         net_pnl: float,
         closed_at_str: str,
-    ) -> str:
-        """Format level hit alert (Target, Stop, or Cutoff hit)."""
+    ) -> Dict[str, Any]:
+        """Format level hit alert embed (Target, Stop, or Time Cutoff)."""
         validate_level_hit(ticker, trade_id, level_type, price, fill_price, net_pnl, closed_at_str)
 
-
         is_target = "TARGET" in level_type.upper()
-        emoji = "🎯" if is_target else ("🛑" if "STOP" in level_type.upper() else "⏰")
+        is_stop = "STOP" in level_type.upper()
+        color = COLOR_GREEN if is_target else (COLOR_RED if is_stop else COLOR_ORANGE)
+        emoji = "🎯" if is_target else ("🛑" if is_stop else "⏰")
         pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
         sign = "+" if net_pnl >= 0 else ""
 
-        text = (
-            f"{emoji} *VETERANDESK LEVEL HIT — {ticker.upper()}*\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"• *Event:* `{level_type}`\n"
-            f"• *Trade ID:* `{trade_id}`\n"
-            f"• *Trigger Price:* `PKR {price:.2f}`\n"
-            f"• *Fill Price:* `PKR {fill_price:.2f}`\n"
-            f"• *Realized Net PnL:* {pnl_emoji} `PKR {sign}{net_pnl:>+10,.2f}`\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱ _Closed At: {closed_at_str}_"
-        )
-        return text
+        fields = [
+            {"name": "Event", "value": f"`{level_type}`", "inline": True},
+            {"name": "Trade ID", "value": f"`{trade_id}`", "inline": True},
+            {"name": "Ticker", "value": f"`{ticker.upper()}`", "inline": True},
+            {"name": "Trigger Price", "value": f"PKR {price:.2f}", "inline": True},
+            {"name": "Fill Price", "value": f"PKR {fill_price:.2f}", "inline": True},
+            {"name": "Realized Net PnL", "value": f"{pnl_emoji} PKR {sign}{net_pnl:>+10,.2f}".strip(), "inline": True},
+            {"name": "Closed At", "value": closed_at_str, "inline": False},
+        ]
 
-    def format_daily_loss_halt_message(
+        embed = {
+            "title": f"{emoji} LEVEL HIT — {ticker.upper()}",
+            "color": color,
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "VeteranDesk PSX Trading Agent • Trade Lifecycle"},
+        }
+        return embed
+
+    def format_daily_loss_halt_embed(
         self,
         loss_pct: float,
         max_loss_pct: float,
         loss_amount_pkr: float,
         halt_time_pkt: str,
         action_taken: str,
-    ) -> str:
-        """Format daily loss halt critical notification."""
+    ) -> Dict[str, Any]:
+        """Format daily loss halt critical notification embed."""
         validate_daily_loss_halt(loss_pct, max_loss_pct, loss_amount_pkr, halt_time_pkt, action_taken)
 
+        fields = [
+            {"name": "Daily Loss Reached", "value": f"**{loss_pct:.2f}%** (Limit: {max_loss_pct:.2f}%)", "inline": True},
+            {"name": "Total Realized Loss", "value": f"PKR {loss_amount_pkr:>+10,.2f}", "inline": True},
+            {"name": "Trigger Time", "value": halt_time_pkt, "inline": True},
+            {"name": "Enforcement Action", "value": action_taken.strip(), "inline": False},
+            {"name": "Discipline Invariant", "value": "🔒 All trading is blocked until next market session.", "inline": False},
+        ]
 
-        text = (
-            f"🚨 *CRITICAL DISCIPLINE HALT TRIGGERED*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• *Daily Loss Reached:* `{loss_pct:.2f}%` (Limit: `{max_loss_pct:.2f}%`)\n"
-            f"• *Total Realized Loss:* `PKR {loss_amount_pkr:>+10,.2f}`\n"
-            f"• *Trigger Time:* `{halt_time_pkt}`\n"
-            f"• *Enforcement Action:* `{action_taken.strip()}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔒 _Discipline Invariant: All trading is blocked until the next market session._"
-        )
-        return text
+        embed = {
+            "title": "🚨 CRITICAL DISCIPLINE HALT TRIGGERED",
+            "color": COLOR_DARK_RED,
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "VeteranDesk PSX Trading Agent • Risk Engine"},
+        }
+        return embed
 
-    def format_mistake_alert_message(
+    def format_mistake_alert_embed(
         self,
         rule_violated: str,
         severity: str,
         trade_id: Optional[str],
         details: str,
         detected_at_str: str,
-    ) -> str:
-        """Format independent mistake detection audit alert."""
+    ) -> Dict[str, Any]:
+        """Format independent mistake detection audit alert embed."""
         validate_mistake_alert(rule_violated, severity, details, detected_at_str)
 
-
-        trd_ref = f"`{trade_id.strip()}`" if trade_id and trade_id.strip() else "`N/A (System-wide)`"
         is_crit = severity.upper() == "CRITICAL"
+        color = COLOR_DARK_RED if is_crit else COLOR_ORANGE
         badge = "🚨 CRITICAL" if is_crit else "⚠️ WARNING"
+        trd_ref = f"`{trade_id.strip()}`" if trade_id and trade_id.strip() else "`N/A (System-wide)`"
 
-        text = (
-            f"{badge} *DISCIPLINE AUDIT VIOLATION DETECTED*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• *Rule Violated:* `{rule_violated}`\n"
-            f"• *Severity:* `{severity.upper()}`\n"
-            f"• *Trade Ref:* {trd_ref}\n"
-            f"• *Audit Details:*\n{details.strip()}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱ _Detected: {detected_at_str}_"
-        )
-        return text
+        fields = [
+            {"name": "Rule Violated", "value": f"`{rule_violated}`", "inline": True},
+            {"name": "Severity", "value": f"`{severity.upper()}`", "inline": True},
+            {"name": "Trade Ref", "value": trd_ref, "inline": True},
+            {"name": "Audit Details", "value": details.strip(), "inline": False},
+            {"name": "Detected At", "value": detected_at_str, "inline": False},
+        ]
 
-    def format_graduation_status_message(
+        embed = {
+            "title": f"{badge} DISCIPLINE AUDIT VIOLATION",
+            "color": color,
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "VeteranDesk PSX Trading Agent • Mistake Detector"},
+        }
+        return embed
+
+    def format_graduation_status_embed(
         self,
         status: str,
         total_trades: int,
@@ -232,63 +259,71 @@ class TelegramService:
         expectancy_pkr: float,
         max_drawdown_pct: float,
         blockers_or_status: str,
-    ) -> str:
-        """Format graduation eligibility change alert."""
+    ) -> Dict[str, Any]:
+        """Format graduation eligibility change embed."""
         validate_graduation_status(status, total_trades, win_rate_pct, expectancy_pkr, max_drawdown_pct, blockers_or_status)
 
-
         is_grad = "GRADUATED" in status.upper()
+        color = COLOR_PURPLE if is_grad else COLOR_BLUE
         emoji = "🎓" if is_grad else "📊"
 
-        text = (
-            f"{emoji} *VETERANDESK GRADUATION STATUS UPDATE*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• *Official Status:* `{status.upper()}`\n"
-            f"• *Total Trades:* `{total_trades}` (Req: >=30)\n"
-            f"• *Win Rate:* `{win_rate_pct:.1f}%`\n"
-            f"• *Mathematical Expectancy:* `PKR {expectancy_pkr:>+10,.2f}`\n"
-            f"• *Max Drawdown:* `{max_drawdown_pct:.2f}%` (Max allowed: 10.0%)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📋 *Graduation Analysis:*\n{blockers_or_status.strip()}\n"
-            f"📌 _Real capital allocation allowed only upon meeting all mathematical criteria._"
-        )
-        return text
+        fields = [
+            {"name": "Official Status", "value": f"**{status.upper()}**", "inline": True},
+            {"name": "Total Trades", "value": f"{total_trades} (Req: >=30)", "inline": True},
+            {"name": "Win Rate", "value": f"{win_rate_pct:.1f}%", "inline": True},
+            {"name": "Expectancy", "value": f"PKR {expectancy_pkr:>+10,.2f}", "inline": True},
+            {"name": "Max Drawdown", "value": f"{max_drawdown_pct:.2f}% (Limit: 10.0%)", "inline": True},
+            {"name": "Analysis & Details", "value": blockers_or_status.strip(), "inline": False},
+        ]
 
-    def format_system_health_alert_message(
+        embed = {
+            "title": f"{emoji} GRADUATION STATUS UPDATE",
+            "color": color,
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "VeteranDesk PSX Trading Agent • Graduation Engine"},
+        }
+        return embed
+
+    def format_system_health_alert_embed(
         self,
         status: str,
         reason: str,
         affected_components: List[str],
         timestamp_str: str,
-    ) -> str:
-        """Format critical system outage / heartbeat silence alert."""
+    ) -> Dict[str, Any]:
+        """Format critical system outage / heartbeat silence alert embed."""
         validate_system_health_alert(status, reason, affected_components, timestamp_str)
 
-
+        is_down = any(k in status.upper() for k in ("DOWN", "CRITICAL", "RED", "DEGRADED"))
+        color = COLOR_RED if is_down else COLOR_GREEN
         comps = ", ".join(f"`{c}`" for c in affected_components)
 
-        text = (
-            f"🚨 *SYSTEM ALERT — {status.upper()}*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• *Alert Condition:* `{reason.strip()}`\n"
-            f"• *Impacted Subsystems:* {comps}\n"
-            f"• *Threshold:* Missed heartbeats > 2 minutes (120s)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱ _Reported At: {timestamp_str}_\n"
-            f"⚠️ _Check console logs or dashboard System Health page immediately._"
-        )
-        return text
+        fields = [
+            {"name": "Alert Condition", "value": reason.strip(), "inline": False},
+            {"name": "Impacted Subsystems", "value": comps, "inline": False},
+            {"name": "Threshold", "value": "Missed heartbeats > 2 minutes (120s)", "inline": True},
+            {"name": "Reported At", "value": timestamp_str, "inline": True},
+        ]
 
-    def format_daily_brief(
+        embed = {
+            "title": f"🚨 SYSTEM ALERT — {status.upper()}",
+            "color": color,
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "VeteranDesk PSX Trading Agent • Health Monitor"},
+        }
+        return embed
+
+    def format_daily_brief_embed(
         self,
         date_str: str,
         market_overview: str,
         watchlist_summary: List[Dict[str, Any]],
         key_levels: Optional[List[str]] = None,
-    ) -> str:
-        """Format daily pre-market briefing (9:15 AM PKT)."""
+    ) -> Dict[str, Any]:
+        """Format daily pre-market briefing embed (9:15 AM PKT)."""
         validate_daily_brief(date_str, market_overview)
-
 
         wl_lines = []
         for item in watchlist_summary:
@@ -296,25 +331,37 @@ class TelegramService:
             last_price = item.get("price", 0.0)
             change_pct = item.get("change_pct", 0.0)
             sign = "+" if change_pct >= 0 else ""
-            wl_lines.append(f"  • `{ticker:<6}`: PKR {last_price:>7.2f} ({sign}{change_pct:.2f}%)")
-        wl_text = "\n".join(wl_lines) if wl_lines else "  • Focus symbols under observation."
+            wl_lines.append(f"• `{ticker:<6}`: PKR {last_price:>7.2f} ({sign}{change_pct:.2f}%)")
+        wl_text = "\n".join(wl_lines) if wl_lines else "• Focus symbols under observation."
 
-        levels_text = ""
+        fields = [
+            {"name": "Market Overview", "value": market_overview.strip(), "inline": False},
+            {"name": "Focus Watchlist", "value": wl_text, "inline": False},
+        ]
+
         if key_levels:
-            levels_text = "\n📍 *Key Support/Resistance:*\n" + "\n".join(f"  • {l}" for l in key_levels)
+            fields.append({
+                "name": "Key Support / Resistance",
+                "value": "\n".join(f"• {l}" for l in key_levels),
+                "inline": False,
+            })
 
-        text = (
-            f"🌅 *VETERANDESK DAILY BRIEF — {date_str}*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 *Market Overview:*\n{market_overview.strip()}\n\n"
-            f"📋 *Focus Watchlist:*\n{wl_text}"
-            f"{levels_text}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚡ _Discipline Rule: Max 1.0% risk/trade | Entry cutoff: 15:00 PKT_"
-        )
-        return text
+        fields.append({
+            "name": "Discipline Rule",
+            "value": "Max 1.0% risk/trade | Entry cutoff: 15:00 PKT",
+            "inline": False,
+        })
 
-    def format_session_summary(
+        embed = {
+            "title": f"🌅 VETERANDESK DAILY BRIEF — {date_str}",
+            "color": COLOR_BLUE,
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "VeteranDesk PSX Trading Agent • Morning Brief"},
+        }
+        return embed
+
+    def format_session_summary_embed(
         self,
         session_date: str,
         trades_count: int,
@@ -325,35 +372,39 @@ class TelegramService:
         net_pnl: float,
         discipline_violations: int = 0,
         ending_cash: float = 500000.0,
-    ) -> str:
-        """Format post-market end-of-session summary (3:45 PM PKT)."""
+    ) -> Dict[str, Any]:
+        """Format post-market end-of-session summary embed (3:45 PM PKT)."""
         validate_session_summary(session_date, trades_count, winning_trades, losing_trades, gross_pnl, total_fees, net_pnl)
 
-
         win_rate = (winning_trades / trades_count * 100.0) if trades_count > 0 else 0.0
+        color = COLOR_GREEN if net_pnl >= 0 else COLOR_RED
         pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
         sign = "+" if net_pnl >= 0 else ""
 
-        text = (
-            f"🔔 *VETERANDESK SESSION SUMMARY — {session_date}*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• *Trades Executed:* `{trades_count}` (Cap: 3)\n"
-            f"• *Win / Loss:* `{winning_trades}W / {losing_trades}L` (Win Rate: `{win_rate:.1f}%`)\n"
-            f"• *Gross P&L:* `PKR {gross_pnl:>+10,.2f}`\n"
-            f"• *Fees & Taxes Paid:* `PKR {total_fees:>10,.2f}`\n"
-            f"• *Net P&L:* {pnl_emoji} `PKR {sign}{net_pnl:>10,.2f}`\n"
-            f"• *Closing Cash:* `PKR {ending_cash:>10,.2f}`\n"
-            f"• *Discipline Breaches:* `{discipline_violations}` {'✅ (Clean)' if discipline_violations == 0 else '⚠️ (Flagged)'}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 _Status: All positions closed prior to 15:20 PKT force cutoff._"
-        )
-        return text
+        fields = [
+            {"name": "Trades Executed", "value": f"`{trades_count}` (Cap: 3)", "inline": True},
+            {"name": "Win / Loss", "value": f"`{winning_trades}W / {losing_trades}L` ({win_rate:.1f}%)", "inline": True},
+            {"name": "Discipline Breaches", "value": f"`{discipline_violations}` {'✅ (Clean)' if discipline_violations == 0 else '⚠️ (Flagged)'}", "inline": True},
+            {"name": "Gross P&L", "value": f"PKR {gross_pnl:>+10,.2f}", "inline": True},
+            {"name": "Fees & Taxes", "value": f"PKR {total_fees:>10,.2f}", "inline": True},
+            {"name": "Net P&L", "value": f"{pnl_emoji} PKR {sign}{net_pnl:>+10,.2f}".strip(), "inline": True},
+            {"name": "Closing Cash", "value": f"PKR {ending_cash:>10,.2f}", "inline": True},
+        ]
+
+        embed = {
+            "title": f"🔔 VETERANDESK SESSION SUMMARY — {session_date}",
+            "color": color,
+            "fields": fields,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "VeteranDesk PSX Trading Agent • End of Session"},
+        }
+        return embed
 
     # =========================================================================
     # DATABASE DELIVERY TRACKING PERSISTENCE
     # =========================================================================
 
-    def _persist_message_state(self, msg: OutboundMessage) -> None:
+    def _persist_message_state(self, msg: DiscordOutboundMessage) -> None:
         """Persist message delivery status into Supabase or local SQLite."""
         row = {
             "id": msg.id,
@@ -362,7 +413,7 @@ class TelegramService:
             "attempts": msg.attempts,
             "reference_id": msg.reference_id,
             "event_type": msg.event_type,
-            "payload": msg.text,
+            "payload": msg.payload_json,
             "last_error": msg.last_error,
             "created_at": msg.created_at.isoformat(),
             "sent_at": msg.sent_at.isoformat() if msg.sent_at else None,
@@ -373,7 +424,7 @@ class TelegramService:
         try:
             from veterandesk.database.session import db_manager
             client = db_manager.get_client()
-            client.table("telegram_delivery_log").upsert(row, on_conflict="id").execute()
+            client.table("discord_delivery_log").upsert(row, on_conflict="id").execute()
             return
         except Exception:
             pass
@@ -384,7 +435,7 @@ class TelegramService:
             engine = db_manager.get_engine()
             with engine.connect() as conn:
                 stmt = text("""
-                    INSERT INTO telegram_delivery_log (
+                    INSERT INTO discord_delivery_log (
                         id, message_type, status, attempts, reference_id,
                         event_type, payload, last_error, created_at, sent_at, failed_at
                     ) VALUES (
@@ -401,102 +452,103 @@ class TelegramService:
                 conn.execute(stmt, row)
                 conn.commit()
         except Exception as e:
-            logger.warning("telegram_db_persistence_failed", msg_id=msg.id, error=str(e))
+            logger.warning("discord_db_persistence_failed", msg_id=msg.id, error=str(e))
 
     # =========================================================================
-    # DELIVERY ENGINE (ASYNC & SYNC WITH RETRY, BACKOFF & THROTTLING)
+    # DELIVERY ENGINE (ASYNC & SYNC WITH RETRY, BACKOFF & RATE-LIMITING)
     # =========================================================================
 
     def enqueue_message(
         self,
         msg_type: MessageType,
-        text: str,
+        content: Optional[str] = None,
+        embeds: Optional[List[Dict[str, Any]]] = None,
         reference_id: Optional[str] = None,
         event_type: Optional[str] = None,
-    ) -> OutboundMessage:
+    ) -> DiscordOutboundMessage:
         """Enqueue message for delivery and persist initial pending record in DB."""
-        msg = OutboundMessage(
+        msg = DiscordOutboundMessage(
             id=str(uuid.uuid4()),
             msg_type=msg_type,
-            text=text,
+            content=content,
+            embeds=embeds or [],
             reference_id=reference_id,
             event_type=event_type,
             status=DeliveryStatus.PENDING,
         )
         self.outbound_queue.append(msg)
         self._persist_message_state(msg)
-        logger.info("telegram_message_queued", msg_id=msg.id, type=msg.msg_type.value, ref=reference_id)
+        logger.info("discord_message_queued", msg_id=msg.id, type=msg.msg_type.value, ref=reference_id)
         return msg
 
-    async def _send_with_retry_async(self, msg: OutboundMessage) -> bool:
-        """Deliver single message with exponential backoff and rate limiting."""
-        if not self.enabled or not self.bot_token or not self.chat_id:
-            # Offline / Disabled mode: mark as skipped
+    async def _send_with_retry_async(self, msg: DiscordOutboundMessage) -> bool:
+        """Deliver single message with exponential backoff and 429 rate limit respect (Async)."""
+        if not self.enabled or not self.webhook_url or not self.webhook_url.strip():
             msg.is_delivered = False
             msg.status = DeliveryStatus.SKIPPED
             msg.sent_at = None
-            msg.last_error = "Telegram delivery skipped: notifier is disabled or unconfigured (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing or empty)"
+            msg.last_error = "Discord delivery skipped: notifier is disabled or unconfigured (DISCORD_WEBHOOK_URL missing or empty)"
             self._persist_message_state(msg)
             self.skipped_history.append(msg)
             logger.warning(
-                "telegram_delivery_skipped_not_configured",
+                "discord_delivery_skipped_not_configured",
                 msg_id=msg.id,
                 type=msg.msg_type.value,
                 enabled=self.enabled,
-                has_token=bool(self.bot_token),
-                has_chat_id=bool(self.chat_id),
+                has_webhook=bool(self.webhook_url),
             )
             return False
 
-        api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         backoff_delays = [0.5, 1.0, 2.0]
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             while msg.attempts < msg.max_attempts:
                 msg.attempts += 1
-
-                # Rate limiting: throttle 1.0s between sends to same chat
-                now = time.time()
-                elapsed = now - self.last_send_timestamp
-                if elapsed < self.min_interval_seconds:
-                    await asyncio.sleep(self.min_interval_seconds - elapsed)
-
                 try:
-                    payload = {
-                        "chat_id": self.chat_id,
-                        "text": msg.text,
-                        "parse_mode": "Markdown",
-                    }
-                    resp = await client.post(api_url, json=payload)
+                    resp = await client.post(self.webhook_url, json=msg.payload_dict)
                     self.last_send_timestamp = time.time()
 
-                    if resp.status_code == 200:
+                    # Discord webhook success is 200 or 204
+                    if resp.status_code in (200, 204):
                         msg.is_delivered = True
                         msg.status = DeliveryStatus.SENT
                         msg.sent_at = datetime.now(timezone.utc)
                         self._persist_message_state(msg)
                         self.delivered_history.append(msg)
-                        logger.info("telegram_delivered_success", msg_id=msg.id, type=msg.msg_type.value, attempts=msg.attempts)
+                        logger.info("discord_delivered_success", msg_id=msg.id, type=msg.msg_type.value, attempts=msg.attempts)
                         return True
+                    elif resp.status_code == 429:
+                        # Rate limit encountered
+                        retry_after = 1.0
+                        try:
+                            rate_data = resp.json()
+                            retry_after = float(rate_data.get("retry_after", 1.0))
+                        except Exception:
+                            pass
+                        msg.last_error = f"HTTP 429 Rate Limited (retry_after={retry_after}s)"
+                        logger.warning("discord_rate_limited", msg_id=msg.id, attempt=msg.attempts, retry_after=retry_after)
+                        if msg.attempts < msg.max_attempts:
+                            await asyncio.sleep(retry_after)
+                            continue
                     else:
                         msg.last_error = f"HTTP {resp.status_code}: {resp.text}"
-                        logger.warning("telegram_send_failed_attempt", msg_id=msg.id, attempt=msg.attempts, error=msg.last_error)
+                        logger.warning("discord_send_failed_attempt", msg_id=msg.id, attempt=msg.attempts, error=msg.last_error)
                 except Exception as e:
                     self.last_send_timestamp = time.time()
                     msg.last_error = str(e)
-                    logger.warning("telegram_send_exception_attempt", msg_id=msg.id, attempt=msg.attempts, error=str(e))
+                    logger.warning("discord_send_exception_attempt", msg_id=msg.id, attempt=msg.attempts, error=str(e))
 
                 if msg.attempts < msg.max_attempts:
                     delay = backoff_delays[min(msg.attempts - 1, len(backoff_delays) - 1)]
                     await asyncio.sleep(delay)
 
-        # All 3 attempts exhausted
+        # All attempts exhausted
         msg.status = DeliveryStatus.FAILED
         msg.failed_at = datetime.now(timezone.utc)
         self._persist_message_state(msg)
         self.failed_dead_letter.append(msg)
         logger.error(
-            "telegram_delivery_failed_permanently",
+            "discord_delivery_failed_permanently",
             msg_id=msg.id,
             type=msg.msg_type.value,
             attempts=msg.attempts,
@@ -505,75 +557,74 @@ class TelegramService:
         )
         return False
 
-    def _send_with_retry_sync(self, msg: OutboundMessage) -> bool:
-        """Synchronous delivery with exponential backoff and rate limiting."""
-        if not self.enabled or not self.bot_token or not self.chat_id:
-            # Offline / Disabled mode: mark as skipped
+    def _send_with_retry_sync(self, msg: DiscordOutboundMessage) -> bool:
+        """Deliver single message with exponential backoff and 429 rate limit respect (Sync)."""
+        if not self.enabled or not self.webhook_url or not self.webhook_url.strip():
             msg.is_delivered = False
             msg.status = DeliveryStatus.SKIPPED
             msg.sent_at = None
-            msg.last_error = "Telegram delivery skipped: notifier is disabled or unconfigured (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing or empty)"
+            msg.last_error = "Discord delivery skipped: notifier is disabled or unconfigured (DISCORD_WEBHOOK_URL missing or empty)"
             self._persist_message_state(msg)
             self.skipped_history.append(msg)
             logger.warning(
-                "telegram_delivery_skipped_not_configured",
+                "discord_delivery_skipped_not_configured",
                 msg_id=msg.id,
                 type=msg.msg_type.value,
                 enabled=self.enabled,
-                has_token=bool(self.bot_token),
-                has_chat_id=bool(self.chat_id),
+                has_webhook=bool(self.webhook_url),
             )
             return False
 
-        api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         backoff_delays = [0.5, 1.0, 2.0]
 
         with httpx.Client(timeout=10.0) as client:
             while msg.attempts < msg.max_attempts:
                 msg.attempts += 1
-
-                # Rate limiting: throttle 1.0s between sends to same chat
-                now = time.time()
-                elapsed = now - self.last_send_timestamp
-                if elapsed < self.min_interval_seconds:
-                    time.sleep(self.min_interval_seconds - elapsed)
-
                 try:
-                    payload = {
-                        "chat_id": self.chat_id,
-                        "text": msg.text,
-                        "parse_mode": "Markdown",
-                    }
-                    resp = client.post(api_url, json=payload)
+                    resp = client.post(self.webhook_url, json=msg.payload_dict)
                     self.last_send_timestamp = time.time()
 
-                    if resp.status_code == 200:
+                    # Discord webhook success is 200 or 204
+                    if resp.status_code in (200, 204):
                         msg.is_delivered = True
                         msg.status = DeliveryStatus.SENT
                         msg.sent_at = datetime.now(timezone.utc)
                         self._persist_message_state(msg)
                         self.delivered_history.append(msg)
-                        logger.info("telegram_delivered_success", msg_id=msg.id, type=msg.msg_type.value, attempts=msg.attempts)
+                        logger.info("discord_delivered_success", msg_id=msg.id, type=msg.msg_type.value, attempts=msg.attempts)
                         return True
+                    elif resp.status_code == 429:
+                        # Rate limit encountered
+                        retry_after = 1.0
+                        try:
+                            rate_data = resp.json()
+                            retry_after = float(rate_data.get("retry_after", 1.0))
+                        except Exception:
+                            pass
+                        msg.last_error = f"HTTP 429 Rate Limited (retry_after={retry_after}s)"
+                        logger.warning("discord_rate_limited", msg_id=msg.id, attempt=msg.attempts, retry_after=retry_after)
+                        if msg.attempts < msg.max_attempts:
+                            time.sleep(retry_after)
+                            continue
                     else:
                         msg.last_error = f"HTTP {resp.status_code}: {resp.text}"
-                        logger.warning("telegram_send_failed_attempt", msg_id=msg.id, attempt=msg.attempts, error=msg.last_error)
+                        logger.warning("discord_send_failed_attempt", msg_id=msg.id, attempt=msg.attempts, error=msg.last_error)
                 except Exception as e:
                     self.last_send_timestamp = time.time()
                     msg.last_error = str(e)
-                    logger.warning("telegram_send_exception_attempt", msg_id=msg.id, attempt=msg.attempts, error=str(e))
+                    logger.warning("discord_send_exception_attempt", msg_id=msg.id, attempt=msg.attempts, error=str(e))
 
                 if msg.attempts < msg.max_attempts:
                     delay = backoff_delays[min(msg.attempts - 1, len(backoff_delays) - 1)]
                     time.sleep(delay)
 
-        # All 3 attempts exhausted
+        # All attempts exhausted
         msg.status = DeliveryStatus.FAILED
         msg.failed_at = datetime.now(timezone.utc)
         self._persist_message_state(msg)
         self.failed_dead_letter.append(msg)
         logger.error(
-            "telegram_delivery_failed_permanently",
+            "discord_delivery_failed_permanently",
             msg_id=msg.id,
             type=msg.msg_type.value,
             attempts=msg.attempts,
@@ -588,7 +639,7 @@ class TelegramService:
             return 0
 
         delivered_count = 0
-        remaining_queue: List[OutboundMessage] = []
+        remaining_queue: List[DiscordOutboundMessage] = []
 
         for msg in list(self.outbound_queue):
             success = await self._send_with_retry_async(msg)
@@ -606,7 +657,7 @@ class TelegramService:
             return 0
 
         delivered_count = 0
-        remaining_queue: List[OutboundMessage] = []
+        remaining_queue: List[DiscordOutboundMessage] = []
 
         for msg in list(self.outbound_queue):
             success = self._send_with_retry_sync(msg)
@@ -619,35 +670,37 @@ class TelegramService:
         return delivered_count
 
     # =========================================================================
-    # HIGH-LEVEL ALERT DISPATCHERS (ASYNC & SYNC)
+    # HIGH-LEVEL ALERT DISPATCHERS (SYNC & ASYNC)
     # =========================================================================
 
     def send_message(
         self,
-        text: str,
+        content: Optional[str] = None,
+        embeds: Optional[List[Dict[str, Any]]] = None,
         msg_type: MessageType = MessageType.ALERT,
         reference_id: Optional[str] = None,
         event_type: Optional[str] = None,
     ) -> bool:
-        """Send an arbitrary schema-validated message with retry and persistence."""
-        if not text or not text.strip():
-            raise ValueError("Message text cannot be empty or None")
+        """Send an arbitrary message or embed to Discord."""
+        if not content and not embeds:
+            raise ValueError("Must provide either content or embeds for Discord message")
         msg = self.enqueue_message(
             msg_type=msg_type,
-            text=text,
+            content=content,
+            embeds=embeds,
             reference_id=reference_id,
             event_type=event_type or "GENERAL_ALERT",
         )
         return self._send_with_retry_sync(msg)
 
     def send_signal_alert(self, signal: TradeSignal, shares: int, reason_lines: str) -> bool:
-        """Format and immediately dispatch new signal alert."""
-        text = self.format_signal_message(signal, shares, reason_lines)
+        """Format and dispatch trade signal notification embed."""
+        embed = self.format_signal_embed(signal, shares, reason_lines)
         msg = self.enqueue_message(
             msg_type=MessageType.SIGNAL,
-            text=text,
+            embeds=[embed],
             reference_id=signal.signal_id,
-            event_type="NEW_SIGNAL_APPROVED"
+            event_type="NEW_SIGNAL_APPROVED",
         )
         return self._send_with_retry_sync(msg)
 
@@ -661,9 +714,9 @@ class TelegramService:
         net_pnl: float,
         closed_at_str: Optional[str] = None,
     ) -> bool:
-        """Format and immediately dispatch level hit notification."""
+        """Format and dispatch level hit notification embed."""
         ts_str = closed_at_str or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        text = self.format_level_hit_message(
+        embed = self.format_level_hit_embed(
             ticker=ticker,
             trade_id=trade_id,
             level_type=level_type,
@@ -674,9 +727,9 @@ class TelegramService:
         )
         msg = self.enqueue_message(
             msg_type=MessageType.LEVEL_HIT,
-            text=text,
+            embeds=[embed],
             reference_id=trade_id,
-            event_type=f"LEVEL_HIT_{level_type}"
+            event_type=f"LEVEL_HIT_{level_type}",
         )
         return self._send_with_retry_sync(msg)
 
@@ -688,9 +741,9 @@ class TelegramService:
         halt_time_pkt: Optional[str] = None,
         action_taken: str = "Trading halted; all open positions flattened.",
     ) -> bool:
-        """Format and immediately dispatch daily loss limit halt alert."""
+        """Format and dispatch daily loss halt notification embed."""
         t_str = halt_time_pkt or datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        text = self.format_daily_loss_halt_message(
+        embed = self.format_daily_loss_halt_embed(
             loss_pct=loss_pct,
             max_loss_pct=max_loss_pct,
             loss_amount_pkr=loss_amount_pkr,
@@ -699,9 +752,9 @@ class TelegramService:
         )
         msg = self.enqueue_message(
             msg_type=MessageType.DAILY_HALT,
-            text=text,
+            embeds=[embed],
             reference_id=f"HALT_{datetime.now(timezone.utc).strftime('%Y%m%d')}",
-            event_type="DAILY_LOSS_HALT_TRIGGERED"
+            event_type="DAILY_LOSS_HALT_TRIGGERED",
         )
         return self._send_with_retry_sync(msg)
 
@@ -713,9 +766,9 @@ class TelegramService:
         details: str,
         detected_at_str: Optional[str] = None,
     ) -> bool:
-        """Format and immediately dispatch mistake audit alert."""
+        """Format and dispatch mistake audit alert embed."""
         ts_str = detected_at_str or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        text = self.format_mistake_alert_message(
+        embed = self.format_mistake_alert_embed(
             rule_violated=rule_violated,
             severity=severity,
             trade_id=trade_id,
@@ -724,9 +777,9 @@ class TelegramService:
         )
         msg = self.enqueue_message(
             msg_type=MessageType.MISTAKE_VIOLATION,
-            text=text,
+            embeds=[embed],
             reference_id=trade_id,
-            event_type=f"MISTAKE_{rule_violated}"
+            event_type=f"MISTAKE_{rule_violated}",
         )
         return self._send_with_retry_sync(msg)
 
@@ -739,8 +792,8 @@ class TelegramService:
         max_drawdown_pct: float,
         blockers_or_status: str,
     ) -> bool:
-        """Format and immediately dispatch graduation status change alert."""
-        text = self.format_graduation_status_message(
+        """Format and dispatch graduation status change embed."""
+        embed = self.format_graduation_status_embed(
             status=status,
             total_trades=total_trades,
             win_rate_pct=win_rate_pct,
@@ -750,9 +803,9 @@ class TelegramService:
         )
         msg = self.enqueue_message(
             msg_type=MessageType.GRADUATION_STATUS,
-            text=text,
+            embeds=[embed],
             reference_id=f"GRADUATION_{int(time.time())}",
-            event_type="GRADUATION_STATUS_CHANGE"
+            event_type="GRADUATION_STATUS_CHANGE",
         )
         return self._send_with_retry_sync(msg)
 
@@ -763,9 +816,9 @@ class TelegramService:
         affected_components: List[str],
         timestamp_str: Optional[str] = None,
     ) -> bool:
-        """Format and immediately dispatch critical system health outage alert."""
+        """Format and dispatch system health outage alert embed."""
         ts_str = timestamp_str or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        text = self.format_system_health_alert_message(
+        embed = self.format_system_health_alert_embed(
             status=status,
             reason=reason,
             affected_components=affected_components,
@@ -773,9 +826,9 @@ class TelegramService:
         )
         msg = self.enqueue_message(
             msg_type=MessageType.SYSTEM_HEALTH,
-            text=text,
+            embeds=[embed],
             reference_id=f"HEALTH_{int(time.time())}",
-            event_type="SYSTEM_HEALTH_OUTAGE"
+            event_type="SYSTEM_HEALTH_OUTAGE",
         )
         return self._send_with_retry_sync(msg)
 
@@ -786,8 +839,8 @@ class TelegramService:
         watchlist_summary: List[Dict[str, Any]],
         key_levels: Optional[List[str]] = None,
     ) -> bool:
-        """Format and immediately dispatch daily morning briefing."""
-        text = self.format_daily_brief(
+        """Format and dispatch daily morning briefing embed."""
+        embed = self.format_daily_brief_embed(
             date_str=date_str,
             market_overview=market_overview,
             watchlist_summary=watchlist_summary,
@@ -795,9 +848,9 @@ class TelegramService:
         )
         msg = self.enqueue_message(
             msg_type=MessageType.DAILY_BRIEF,
-            text=text,
+            embeds=[embed],
             reference_id=f"BRIEF_{date_str}",
-            event_type="DAILY_BRIEF_SCHEDULED"
+            event_type="DAILY_BRIEF_SCHEDULED",
         )
         return self._send_with_retry_sync(msg)
 
@@ -813,8 +866,8 @@ class TelegramService:
         discipline_violations: int = 0,
         ending_cash: float = 500000.0,
     ) -> bool:
-        """Format and immediately dispatch end-of-session summary."""
-        text = self.format_session_summary(
+        """Format and dispatch end-of-session summary embed."""
+        embed = self.format_session_summary_embed(
             session_date=session_date,
             trades_count=trades_count,
             winning_trades=winning_trades,
@@ -827,23 +880,23 @@ class TelegramService:
         )
         msg = self.enqueue_message(
             msg_type=MessageType.SESSION_SUMMARY,
-            text=text,
+            embeds=[embed],
             reference_id=f"SUMMARY_{session_date}",
-            event_type="SESSION_SUMMARY_SCHEDULED"
+            event_type="SESSION_SUMMARY_SCHEDULED",
         )
         return self._send_with_retry_sync(msg)
 
 
 # Global singleton instance
-telegram_service = TelegramService()
+discord_service = DiscordService()
 
 
-def get_delivery_stats() -> Dict[str, int]:
-    """Retrieve message delivery metrics from database."""
+def get_discord_delivery_stats() -> Dict[str, int]:
+    """Retrieve Discord message delivery metrics from database."""
     try:
         from veterandesk.database.session import db_manager
         client = db_manager.get_client()
-        res = client.table("telegram_delivery_log").select("status").execute()
+        res = client.table("discord_delivery_log").select("status").execute()
         rows = res.data or []
         total = len(rows)
         sent = sum(1 for r in rows if r.get("status") == "sent")
@@ -858,7 +911,7 @@ def get_delivery_stats() -> Dict[str, int]:
         from veterandesk.database.session import db_manager
         engine = db_manager.get_engine()
         with engine.connect() as conn:
-            res = conn.execute(text("SELECT status, COUNT(*) FROM telegram_delivery_log GROUP BY status")).fetchall()
+            res = conn.execute(text("SELECT status, COUNT(*) FROM discord_delivery_log GROUP BY status")).fetchall()
             counts = {r[0]: r[1] for r in res}
             total = sum(counts.values())
             return {

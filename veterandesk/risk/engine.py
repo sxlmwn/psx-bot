@@ -106,6 +106,20 @@ class RiskEngine:
             except Exception as ex:
                 logger.warning("telegram_daily_halt_alert_failed", error=str(ex))
 
+            try:
+                from veterandesk.alerts.discord import discord_service
+                loss_pct = (current_day_realized_loss / account_balance * 100.0) if account_balance > 0 else self.max_daily_loss_pct
+                t_str = current_time_pkt.strftime("%H:%M:%S PKT") if current_time_pkt else None
+                discord_service.send_daily_halt_alert(
+                    loss_pct=max(loss_pct, self.max_daily_loss_pct),
+                    max_loss_pct=self.max_daily_loss_pct,
+                    loss_amount_pkr=current_day_realized_loss if current_day_realized_loss > 0 else 10000.0,
+                    halt_time_pkt=t_str,
+                    action_taken="Trading halted for the day; no new orders permitted.",
+                )
+            except Exception as ex:
+                logger.warning("discord_daily_halt_alert_failed", error=str(ex))
+
         # 2. Daily Trade Count Check
         res_trades = check_max_intraday_trades(
             trades_executed_today=trades_executed_today,

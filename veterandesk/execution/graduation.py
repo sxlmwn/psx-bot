@@ -131,18 +131,38 @@ def compute_performance_metrics(
 
 
 def notify_graduation_status(metrics: PerformanceMetrics) -> bool:
-    """Send Telegram notification on graduation eligibility change."""
+    """Send Telegram and Discord notifications on graduation eligibility change."""
+    t_res = False
+    d_res = False
+    status_str = "GRADUATED" if metrics.is_graduated else "NOT_GRADUATED"
+    blockers_str = "All mathematical graduation criteria fulfilled!" if metrics.is_graduated else "; ".join(metrics.graduation_blockers)
+
     try:
         from veterandesk.alerts.telegram import telegram_service
-        return telegram_service.send_graduation_alert(
-            status="GRADUATED" if metrics.is_graduated else "NOT_GRADUATED",
+        t_res = telegram_service.send_graduation_alert(
+            status=status_str,
             total_trades=metrics.total_trades,
             win_rate_pct=metrics.win_rate_pct,
             expectancy_pkr=metrics.expectancy_pkr,
             max_drawdown_pct=metrics.max_drawdown_pct,
-            blockers_or_status="All mathematical graduation criteria fulfilled!" if metrics.is_graduated else "; ".join(metrics.graduation_blockers),
+            blockers_or_status=blockers_str,
         )
     except Exception as ex:
         logger.warning("telegram_graduation_notify_failed", error=str(ex))
-        return False
+
+    try:
+        from veterandesk.alerts.discord import discord_service
+        d_res = discord_service.send_graduation_alert(
+            status=status_str,
+            total_trades=metrics.total_trades,
+            win_rate_pct=metrics.win_rate_pct,
+            expectancy_pkr=metrics.expectancy_pkr,
+            max_drawdown_pct=metrics.max_drawdown_pct,
+            blockers_or_status=blockers_str,
+        )
+    except Exception as ex:
+        logger.warning("discord_graduation_notify_failed", error=str(ex))
+
+    return t_res or d_res
+
 
