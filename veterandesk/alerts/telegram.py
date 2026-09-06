@@ -46,6 +46,7 @@ class DeliveryStatus(str, Enum):
     PENDING = "pending"
     SENT = "sent"
     FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 @dataclass
@@ -98,6 +99,7 @@ class TelegramService:
         self.outbound_queue: List[OutboundMessage] = []
         self.delivered_history: List[OutboundMessage] = []
         self.failed_dead_letter: List[OutboundMessage] = []
+        self.skipped_history: List[OutboundMessage] = []
         self.last_send_timestamp: float = 0.0
         self.min_interval_seconds: float = 1.0  # Respect 1 msg/sec Telegram rate limit
 
@@ -485,14 +487,22 @@ class TelegramService:
     async def _send_with_retry_async(self, msg: OutboundMessage) -> bool:
         """Deliver single message with exponential backoff and rate limiting."""
         if not self.enabled or not self.bot_token or not self.chat_id:
-            # Offline / Disabled mode: mark as sent/mock-delivered
-            msg.is_delivered = True
-            msg.status = DeliveryStatus.SENT
-            msg.sent_at = datetime.now(timezone.utc)
+            # Offline / Disabled mode: mark as skipped
+            msg.is_delivered = False
+            msg.status = DeliveryStatus.SKIPPED
+            msg.sent_at = None
+            msg.last_error = "Telegram delivery skipped: notifier is disabled or unconfigured (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing or empty)"
             self._persist_message_state(msg)
-            self.delivered_history.append(msg)
-            logger.info("telegram_mock_delivered", msg_id=msg.id, type=msg.msg_type.value)
-            return True
+            self.skipped_history.append(msg)
+            logger.warning(
+                "telegram_delivery_skipped_not_configured",
+                msg_id=msg.id,
+                type=msg.msg_type.value,
+                enabled=self.enabled,
+                has_token=bool(self.bot_token),
+                has_chat_id=bool(self.chat_id),
+            )
+            return False
 
         api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         backoff_delays = [0.5, 1.0, 2.0]
@@ -554,14 +564,22 @@ class TelegramService:
     def _send_with_retry_sync(self, msg: OutboundMessage) -> bool:
         """Synchronous delivery with exponential backoff and rate limiting."""
         if not self.enabled or not self.bot_token or not self.chat_id:
-            # Offline / Disabled mode: mark as sent/mock-delivered
-            msg.is_delivered = True
-            msg.status = DeliveryStatus.SENT
-            msg.sent_at = datetime.now(timezone.utc)
+            # Offline / Disabled mode: mark as skipped
+            msg.is_delivered = False
+            msg.status = DeliveryStatus.SKIPPED
+            msg.sent_at = None
+            msg.last_error = "Telegram delivery skipped: notifier is disabled or unconfigured (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing or empty)"
             self._persist_message_state(msg)
-            self.delivered_history.append(msg)
-            logger.info("telegram_mock_delivered", msg_id=msg.id, type=msg.msg_type.value)
-            return True
+            self.skipped_history.append(msg)
+            logger.warning(
+                "telegram_delivery_skipped_not_configured",
+                msg_id=msg.id,
+                type=msg.msg_type.value,
+                enabled=self.enabled,
+                has_token=bool(self.bot_token),
+                has_chat_id=bool(self.chat_id),
+            )
+            return False
 
         api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         backoff_delays = [0.5, 1.0, 2.0]
@@ -632,7 +650,7 @@ class TelegramService:
             success = await self._send_with_retry_async(msg)
             if success:
                 delivered_count += 1
-            else:
+            elif msg.status not in (DeliveryStatus.FAILED, DeliveryStatus.SKIPPED):
                 remaining_queue.append(msg)
 
         self.outbound_queue = remaining_queue
@@ -650,7 +668,7 @@ class TelegramService:
             success = self._send_with_retry_sync(msg)
             if success:
                 delivered_count += 1
-            else:
+            elif msg.status not in (DeliveryStatus.FAILED, DeliveryStatus.SKIPPED):
                 remaining_queue.append(msg)
 
         self.outbound_queue = remaining_queue
@@ -887,7 +905,8 @@ def get_delivery_stats() -> Dict[str, int]:
         sent = sum(1 for r in rows if r.get("status") == "sent")
         failed = sum(1 for r in rows if r.get("status") == "failed")
         pending = sum(1 for r in rows if r.get("status") == "pending")
-        return {"total": total, "sent": sent, "failed": failed, "pending": pending}
+        skipped = sum(1 for r in rows if r.get("status") == "skipped")
+        return {"total": total, "sent": sent, "failed": failed, "pending": pending, "skipped": skipped}
     except Exception:
         pass
 
@@ -903,6 +922,7 @@ def get_delivery_stats() -> Dict[str, int]:
                 "sent": counts.get("sent", 0),
                 "failed": counts.get("failed", 0),
                 "pending": counts.get("pending", 0),
+                "skipped": counts.get("skipped", 0),
             }
     except Exception:
-        return {"total": 0, "sent": 0, "failed": 0, "pending": 0}
+        return {"total": 0, "sent": 0, "failed": 0, "pending": 0, "skipped": 0}

@@ -169,6 +169,7 @@ def run_telegram_test(
     print("[*] Invoking `telegram_service.send_message()`...")
     hist_before = len(service.delivered_history)
     failed_before = len(service.failed_dead_letter)
+    skipped_before = len(service.skipped_history)
 
     send_success = service.send_message(
         text=test_message,
@@ -179,7 +180,9 @@ def run_telegram_test(
 
     # Locate the created OutboundMessage object
     outbound: Optional[OutboundMessage] = None
-    if len(service.delivered_history) > hist_before:
+    if len(service.skipped_history) > skipped_before:
+        outbound = service.skipped_history[-1]
+    elif len(service.delivered_history) > hist_before:
         outbound = service.delivered_history[-1]
     elif len(service.failed_dead_letter) > failed_before:
         outbound = service.failed_dead_letter[-1]
@@ -190,16 +193,17 @@ def run_telegram_test(
     print()
     print("=" * 80)
 
-    if not is_configured_for_real or (outbound and outbound.attempts == 0):
+    if not is_configured_for_real or (outbound and (outbound.status == DeliveryStatus.SKIPPED or outbound.attempts == 0)):
         # MOCK / OFFLINE MODE
-        print("⚠️  DELIVERY RESULT: MOCK / OFFLINE MODE (SIMULATED LOCALLY)")
+        print("⚠️  DELIVERY RESULT: MOCK / OFFLINE MODE (DELIVERY SKIPPED)")
         print("=" * 80)
         print("[!] No network transmission to api.telegram.org occurred.")
         print("[!] Reason: Missing or empty TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in environment.")
-        print(f"[!] Result Flag Returned  : {send_success}")
+        print(f"[!] Result Flag Returned  : {send_success} (False = not sent over network)")
         print(f"[!] Attempt Count         : {outbound.attempts if outbound else 0} (0 attempts confirms NO network call was made)")
         print(f"[!] Message Delivery ID   : {outbound.id if outbound else 'N/A'}")
-        print(f"[!] Internal DB Status    : {outbound.status.value if outbound else 'unknown'}")
+        print(f"[!] Internal DB Status    : {outbound.status.value if outbound else 'unknown'} (correctly recorded as 'skipped', NOT 'sent')")
+        print(f"[!] Log Reason Stored     : {outbound.last_error if outbound else 'None'}")
         print()
         print("NEXT STEP TO ENABLE REAL TELEGRAM DELIVERY:")
         print("  1. Add your real bot token to .env: TELEGRAM_BOT_TOKEN=123456:ABC-DEF...")

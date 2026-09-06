@@ -137,6 +137,58 @@ class TestHealthAndAlerts:
             assert "Timed out" in (msg.last_error or "")
             assert msg in svc.failed_dead_letter
 
+    @pytest.mark.asyncio
+    async def test_telegram_disabled_or_unconfigured_marks_skipped_not_sent(self) -> None:
+        """
+        Critical regression test:
+        Asserts that when the service is disabled or unconfigured, messages
+        are recorded with status SKIPPED, NEVER SENT, and is_delivered is False.
+        """
+        # Case 1: Disabled flag (enabled=False) - Sync
+        svc_disabled = TelegramService(bot_token="tok123", chat_id="chat123", enabled=False)
+        msg1 = svc_disabled.enqueue_message(MessageType.ALERT, "Test Disabled Alert")
+        res1 = svc_disabled._send_with_retry_sync(msg1)
+        assert res1 is False
+        assert msg1.status == DeliveryStatus.SKIPPED
+        assert msg1.status != DeliveryStatus.SENT
+        assert msg1.is_delivered is False
+        assert msg1.attempts == 0
+        assert msg1.sent_at is None
+        assert msg1 in svc_disabled.skipped_history
+        assert msg1 not in svc_disabled.delivered_history
+
+        # Case 2: Missing bot_token - Sync
+        svc_no_tok = TelegramService(bot_token="", chat_id="chat123", enabled=True)
+        msg2 = svc_no_tok.enqueue_message(MessageType.SIGNAL, "Test No Token Signal")
+        res2 = svc_no_tok._send_with_retry_sync(msg2)
+        assert res2 is False
+        assert msg2.status == DeliveryStatus.SKIPPED
+        assert msg2.status != DeliveryStatus.SENT
+        assert msg2.is_delivered is False
+        assert msg2.attempts == 0
+        assert msg2.sent_at is None
+
+        # Case 3: Missing chat_id - Sync
+        svc_no_chat = TelegramService(bot_token="tok123", chat_id="", enabled=True)
+        msg3 = svc_no_chat.enqueue_message(MessageType.LEVEL_HIT, "Test No Chat Level Hit")
+        res3 = svc_no_chat._send_with_retry_sync(msg3)
+        assert res3 is False
+        assert msg3.status == DeliveryStatus.SKIPPED
+        assert msg3.status != DeliveryStatus.SENT
+        assert msg3.is_delivered is False
+
+        # Case 4: Disabled flag - Async delivery
+        msg4 = svc_disabled.enqueue_message(MessageType.ALERT, "Test Disabled Async")
+        res4 = await svc_disabled._send_with_retry_async(msg4)
+        assert res4 is False
+        assert msg4.status == DeliveryStatus.SKIPPED
+        assert msg4.status != DeliveryStatus.SENT
+        assert msg4.is_delivered is False
+        assert msg4.attempts == 0
+        assert msg4.sent_at is None
+        assert msg4 in svc_disabled.skipped_history
+        assert msg4 not in svc_disabled.delivered_history
+
 
 class TestSchemaValidation:
     def test_format_signal_message_validation(self) -> None:
@@ -541,4 +593,5 @@ class TestHookPointsIntegration:
         assert "sent" in stats
         assert "failed" in stats
         assert "pending" in stats
+        assert "skipped" in stats
 

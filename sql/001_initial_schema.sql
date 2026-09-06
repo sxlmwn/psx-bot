@@ -251,7 +251,7 @@ $$;
 CREATE TABLE IF NOT EXISTS telegram_delivery_log (
     id VARCHAR(64) PRIMARY KEY,
     message_type VARCHAR(32) NOT NULL,
-    status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
+    status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed', 'skipped')),
     attempts INT NOT NULL DEFAULT 0,
     reference_id VARCHAR(64),
     event_type VARCHAR(64),

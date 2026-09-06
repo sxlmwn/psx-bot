@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 from fastapi.testclient import TestClient
 
-from veterandesk.alerts.telegram import MessageType, OutboundMessage, TelegramService
+from veterandesk.alerts.telegram import DeliveryStatus, MessageType, OutboundMessage, TelegramService
 from veterandesk.api.app import app
 from veterandesk.config import settings
 from veterandesk.database.migration import run_migration
@@ -66,19 +66,24 @@ class TestCoverageExpansion:
         assert tn.TelegramService is TelegramService
         assert tn.telegram_service is not None
 
-        # 4. Direct dispatch calls in offline mode
+        # 4. Direct dispatch calls in offline mode (now returns False and marks SKIPPED)
         svc_offline = TelegramService(enabled=False)
         with patch.object(svc_offline, "_persist_message_state"):
-            assert svc_offline.send_message("Direct test alert", reference_id="REF_DIR") is True
-            assert svc_offline.send_level_hit_alert("OGDC", "TRD_1", "TARGET_HIT", 100.0, 100.0, 500.0) is True
-            assert svc_offline.send_graduation_alert("GRADUATED", 30, 60.0, 1500.0, 4.0, "Approved") is True
-            assert svc_offline.send_system_health_alert("SYSTEM_DOWN", "Outage", ["database"]) is True
-            assert svc_offline.send_daily_brief("2026-09-06", "Open green", []) is True
-            assert svc_offline.send_session_summary("2026-09-06", 1, 1, 0, 1000.0, 50.0, 950.0) is True
+            assert svc_offline.send_message("Direct test alert", reference_id="REF_DIR") is False
+            assert svc_offline.send_level_hit_alert("OGDC", "TRD_1", "TARGET_HIT", 100.0, 100.0, 500.0) is False
+            assert svc_offline.send_graduation_alert("GRADUATED", 30, 60.0, 1500.0, 4.0, "Approved") is False
+            assert svc_offline.send_system_health_alert("SYSTEM_DOWN", "Outage", ["database"]) is False
+            assert svc_offline.send_daily_brief("2026-09-06", "Open green", []) is False
+            assert svc_offline.send_session_summary("2026-09-06", 1, 1, 0, 1000.0, 50.0, 950.0) is False
 
-            # 5. process_queue_sync
+            assert len(svc_offline.skipped_history) == 6
+            assert len(svc_offline.delivered_history) == 0
+            for sk in svc_offline.skipped_history:
+                assert sk.status == DeliveryStatus.SKIPPED
+
+            # 5. process_queue_sync (skipped messages are not counted as delivered)
             svc_offline.enqueue_message(MessageType.ALERT, "Queue Sync")
-            assert svc_offline.process_queue_sync() == 7
+            assert svc_offline.process_queue_sync() == 0
 
 
 

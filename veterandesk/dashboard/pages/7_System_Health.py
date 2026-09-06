@@ -60,18 +60,29 @@ st.subheader("📲 Telegram Outbound Delivery & Outbox (`telegram_delivery_log`)
 from veterandesk.alerts.telegram import get_delivery_stats
 
 stats = get_delivery_stats()
-t_col1, t_col2, t_col3, t_col4 = st.columns(4)
+t_col1, t_col2, t_col3, t_col4, t_col5 = st.columns(5)
 t_col1.metric("Total Messages", stats["total"])
 t_col2.metric("Delivered (Sent)", stats["sent"], delta=f"{stats['sent']} delivered" if stats['sent'] > 0 else None)
 t_col3.metric("Pending In-Flight", stats["pending"])
-failed_val = stats["failed"]
+skipped_val = stats.get("skipped", 0)
 t_col4.metric(
+    "Skipped / Mock",
+    skipped_val,
+    delta="⚠️ Unconfigured" if skipped_val > 0 else "0 Skipped (Clean)",
+    delta_color="inverse" if skipped_val > 0 else "normal",
+    help="Alerts skipped because Telegram bot token or chat ID is missing/disabled",
+)
+failed_val = stats["failed"]
+t_col5.metric(
     "Failed (3x Retried)",
     failed_val,
     delta="🚨 Attention" if failed_val > 0 else "0 Failed (Clean)",
     delta_color="inverse" if failed_val > 0 else "normal",
-    help="Messages that permanently failed after 3 exponential backoff attempts"
+    help="Messages that permanently failed after 3 exponential backoff attempts",
 )
+
+if skipped_val > 0:
+    st.warning(f"⚠️ **{skipped_val} Telegram alert(s) SKIPPED**: Notifier was unconfigured or disabled. Real messages were never sent to Telegram. Check `.env` settings.")
 
 try:
     res_tg = client.table("telegram_delivery_log").select("*").order("created_at", desc=True).limit(20).execute()

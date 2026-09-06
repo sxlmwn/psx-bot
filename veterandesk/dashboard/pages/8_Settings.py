@@ -64,11 +64,31 @@ with tab4:
     from veterandesk.alerts.telegram import get_delivery_stats
     stats = get_delivery_stats()
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Total Dispatched", stats["total"])
     m2.metric("Delivered (Sent)", stats["sent"])
     m3.metric("Pending In-Flight", stats["pending"])
-    m4.metric("Failed (Retries Exhausted)", stats["failed"], delta="Clean" if stats["failed"] == 0 else "Needs Review", delta_color="normal" if stats["failed"] == 0 else "inverse")
+    skipped_count = stats.get("skipped", 0)
+    m4.metric(
+        "Skipped / Mock",
+        skipped_count,
+        delta="⚠️ Unconfigured" if skipped_count > 0 else "0 Skipped",
+        delta_color="inverse" if skipped_count > 0 else "normal",
+        help="Alerts skipped because Telegram credentials are missing/disabled",
+    )
+    m5.metric("Failed (Retries Exhausted)", stats["failed"], delta="Clean" if stats["failed"] == 0 else "Needs Review", delta_color="normal" if stats["failed"] == 0 else "inverse")
+
+    token_configured = bool(settings.telegram_bot_token and str(settings.telegram_bot_token).strip())
+    chat_configured = bool(settings.telegram_chat_id and str(settings.telegram_chat_id).strip())
+    is_live = bool(settings.telegram_enabled and token_configured and chat_configured)
+
+    if is_live:
+        st.success("🟢 **Telegram Delivery Active**: Bot token and Chat ID are configured. Live alerts will be transmitted.")
+    else:
+        st.warning(
+            "⚠️ **Telegram Delivery Disabled / Offline**: Alerts are logged with status `skipped` instead of being sent. "
+            "To enable live delivery, configure `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`."
+        )
 
     st.markdown("### Delivery Engine Guarantees")
     st.markdown(
