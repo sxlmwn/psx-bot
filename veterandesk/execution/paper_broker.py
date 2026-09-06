@@ -301,6 +301,31 @@ class PaperBroker:
         self._persist_trade_to_db(trade)
         self._persist_ledger_entries_to_db(entries)
 
+        if self.persist_to_db:
+            # Telegram alert on level hit / position closed
+            try:
+                from veterandesk.alerts.telegram import telegram_service
+                telegram_service.send_level_hit_alert(
+                    ticker=trade.ticker,
+                    trade_id=trade.trade_id,
+                    level_type=exit_reason.value,
+                    price=scraped_price,
+                    fill_price=filled_exit_price,
+                    net_pnl=net_trade_pnl,
+                    closed_at_str=ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                )
+            except Exception as ex:
+                logger.warning("telegram_level_hit_alert_failed", error=str(ex), trade_id=trade.trade_id)
+
+            # Telegram alert on graduation eligibility check
+            try:
+                from veterandesk.execution.graduation import compute_performance_metrics, notify_graduation_status
+                metrics = compute_performance_metrics(self.closed_trades)
+                if metrics.is_graduated or len(self.closed_trades) == 30:
+                    notify_graduation_status(metrics)
+            except Exception as ex:
+                logger.warning("telegram_graduation_check_failed", error=str(ex), trade_id=trade.trade_id)
+
         logger.info(
             "demo_exit_filled",
             trade_id=trade_id,

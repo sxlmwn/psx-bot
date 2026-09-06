@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from typing import List
 from veterandesk.config import settings
 from veterandesk.execution.paper_broker import DemoTrade
+from veterandesk.logging import get_logger
+
+logger = get_logger("veterandesk.graduation")
 
 
 @dataclass(frozen=True)
@@ -125,3 +128,21 @@ def compute_performance_metrics(
         is_graduated=is_graduated,
         graduation_blockers=blockers
     )
+
+
+def notify_graduation_status(metrics: PerformanceMetrics) -> bool:
+    """Send Telegram notification on graduation eligibility change."""
+    try:
+        from veterandesk.alerts.telegram import telegram_service
+        return telegram_service.send_graduation_alert(
+            status="GRADUATED" if metrics.is_graduated else "NOT_GRADUATED",
+            total_trades=metrics.total_trades,
+            win_rate_pct=metrics.win_rate_pct,
+            expectancy_pkr=metrics.expectancy_pkr,
+            max_drawdown_pct=metrics.max_drawdown_pct,
+            blockers_or_status="All mathematical graduation criteria fulfilled!" if metrics.is_graduated else "; ".join(metrics.graduation_blockers),
+        )
+    except Exception as ex:
+        logger.warning("telegram_graduation_notify_failed", error=str(ex))
+        return False
+

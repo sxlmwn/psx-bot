@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     # Telegram
     telegram_bot_token: Optional[str] = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: Optional[str] = Field(default=None, alias="TELEGRAM_CHAT_ID")
-    telegram_enabled: bool = False
+    telegram_enabled: bool = Field(default=True, alias="TELEGRAM_ENABLED")
 
     # Health Heartbeat
     heartbeat_interval_seconds: int = 60

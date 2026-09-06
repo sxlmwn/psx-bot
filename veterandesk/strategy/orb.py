@@ -26,7 +26,8 @@ def compute_orb_signal(
     volume_multiplier: float = 1.50,
     target_multiplier: float = 1.50,
     session_id: str = "default_session",
-    fixed_signal_id: Optional[str] = None
+    fixed_signal_id: Optional[str] = None,
+    notify: bool = False,
 ) -> Optional[TradeSignal]:
     """
     Pure deterministic ORB strategy calculation.
@@ -122,7 +123,7 @@ def compute_orb_signal(
 
             sig_id = fixed_signal_id or f"SIG_{ticker}_{int(created_at.timestamp())}_{uuid.uuid4().hex[:6]}"
 
-            return TradeSignal(
+            sig = TradeSignal(
                 signal_id=sig_id,
                 ticker=ticker.upper(),
                 strategy="ORB_v1.0",
@@ -140,5 +141,18 @@ def compute_orb_signal(
                 created_at=created_at,
                 session_id=session_id
             )
+
+            if notify:
+                try:
+                    from veterandesk.alerts.telegram import telegram_service
+                    telegram_service.send_signal_alert(
+                        signal=sig,
+                        shares=100,  # Provisional size until risk engine evaluates
+                        reason_lines=f"ORB breakout on {volume_multiplier}x volume expansion.\nInvalidation: {sig.invalidation_reason}",
+                    )
+                except Exception:
+                    pass
+
+            return sig
 
     return None

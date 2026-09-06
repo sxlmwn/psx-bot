@@ -1,4 +1,7 @@
-"""Alerts and Telegram package for VeteranDesk."""
+"""
+Telegram Notifier Re-export Module.
+Allows importing TelegramService and telegram_service directly from telegram_notifier.
+"""
 
 from veterandesk.alerts.telegram import (
     DeliveryStatus,

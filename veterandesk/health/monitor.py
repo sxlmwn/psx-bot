@@ -133,3 +133,32 @@ class SystemHealthMonitor:
         """
         delta = (datetime.now(timezone.utc) - self.last_heartbeat).total_seconds()
         return delta > threshold_seconds
+
+    def check_health_and_alert(self, threshold_seconds: int = 120) -> bool:
+        """
+        Check if system heartbeat was missed > threshold_seconds (default 120s)
+        or if any critical subsystem is RED. Dispatches Telegram SYSTEM_HEALTH alert.
+        """
+        is_down = self.is_system_down(threshold_seconds)
+        red_components = [h.name for h in self.components.values() if h.status == ComponentStatus.RED]
+
+        if is_down or red_components:
+            reason = (
+                f"Heartbeat silence threshold exceeded ({threshold_seconds}s)"
+                if is_down
+                else f"Subsystems degraded: {', '.join(red_components)}"
+            )
+            affected = red_components if red_components else list(self.components.keys())
+            try:
+                from veterandesk.alerts.telegram import telegram_service
+                telegram_service.send_system_health_alert(
+                    status="SYSTEM_DOWN" if is_down else "DEGRADED",
+                    reason=reason,
+                    affected_components=affected,
+                    timestamp_str=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                )
+            except Exception as ex:
+                logger.warning("telegram_health_alert_failed", error=str(ex))
+            return True
+        return False
+

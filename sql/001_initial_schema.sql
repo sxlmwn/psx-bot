@@ -247,3 +247,22 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
+-- 15. Telegram Delivery Log Table
+CREATE TABLE IF NOT EXISTS telegram_delivery_log (
+    id VARCHAR(64) PRIMARY KEY,
+    message_type VARCHAR(32) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
+    attempts INT NOT NULL DEFAULT 0,
+    reference_id VARCHAR(64),
+    event_type VARCHAR(64),
+    payload TEXT NOT NULL,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+    sent_at TIMESTAMPTZ,
+    failed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_delivery_status ON telegram_delivery_log(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_telegram_delivery_ref ON telegram_delivery_log(reference_id);
+
+

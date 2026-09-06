@@ -4,7 +4,7 @@ migration runner, database session utilities, and post-mortem edge cases.
 Enforces overall test coverage >= 85% across veterandesk.
 """
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -61,6 +61,27 @@ class TestCoverageExpansion:
         assert "66.7%" in summary
         assert "9,400.00" in summary
 
+        # 3. Test telegram_notifier module re-exports
+        import veterandesk.alerts.telegram_notifier as tn
+        assert tn.TelegramService is TelegramService
+        assert tn.telegram_service is not None
+
+        # 4. Direct dispatch calls in offline mode
+        svc_offline = TelegramService(enabled=False)
+        with patch.object(svc_offline, "_persist_message_state"):
+            assert svc_offline.send_message("Direct test alert", reference_id="REF_DIR") is True
+            assert svc_offline.send_level_hit_alert("OGDC", "TRD_1", "TARGET_HIT", 100.0, 100.0, 500.0) is True
+            assert svc_offline.send_graduation_alert("GRADUATED", 30, 60.0, 1500.0, 4.0, "Approved") is True
+            assert svc_offline.send_system_health_alert("SYSTEM_DOWN", "Outage", ["database"]) is True
+            assert svc_offline.send_daily_brief("2026-09-06", "Open green", []) is True
+            assert svc_offline.send_session_summary("2026-09-06", 1, 1, 0, 1000.0, 50.0, 950.0) is True
+
+            # 5. process_queue_sync
+            svc_offline.enqueue_message(MessageType.ALERT, "Queue Sync")
+            assert svc_offline.process_queue_sync() == 7
+
+
+
     @pytest.mark.asyncio
     async def test_telegram_async_delivery_and_retries(self):
         svc = TelegramService(bot_token="fake_token", chat_id="12345", enabled=True)
@@ -81,11 +102,11 @@ class TestCoverageExpansion:
         # Mock failure and retry queue
         svc.enabled = True
         msg_fail = svc.enqueue_message(MessageType.ALERT, "Fail Alert")
-        with patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("Network down")):
+        with patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("Network down")), patch("asyncio.sleep"):
             count = await svc.process_queue()
             assert count == 0
             assert msg_fail.is_delivered is False
-            assert msg_fail.attempts == 1
+            assert msg_fail.attempts == 3
 
     def test_api_trade_and_journal_endpoints(self):
         client = TestClient(app)
@@ -206,3 +227,50 @@ class TestCoverageExpansion:
         # 3. Insufficient cash
         with pytest.raises(ValueError, match="Insufficient funds"):
             broker.execute_buy(sig, shares=100, scraped_price=100.0)
+
+    def test_scheduler_and_orb_alert_coverage(self):
+        from veterandesk.alerts.scheduler import run_daily_brief_job, run_session_summary_job
+        from veterandesk.alerts.telegram import telegram_service
+        from veterandesk.market_data.candle_builder import Candle
+        from veterandesk.strategy.orb import compute_orb_signal
+
+        # Scheduler failure handling
+        with patch.object(telegram_service, "send_daily_brief", side_effect=RuntimeError("Simulated brief fail")):
+            assert run_daily_brief_job() is False
+
+        with patch.object(telegram_service, "send_session_summary", side_effect=RuntimeError("Simulated summary fail")):
+            assert run_session_summary_job() is False
+
+        # ORB notify=True coverage
+        base_dt = datetime(2026, 9, 4, 9, 15, tzinfo=timezone.utc)
+        candles = []
+        for i in range(15):
+            candles.append({
+                "timestamp": base_dt + timedelta(minutes=i),
+                "open": 326.5,
+                "high": 328.0,
+                "low": 326.0,
+                "close": 327.0,
+                "volume": 1000.0,
+                "data_status": "ok",
+            })
+        # Breakout candle
+        candles.append({
+            "timestamp": base_dt + timedelta(minutes=15),
+            "open": 327.5,
+            "high": 329.0,
+            "low": 327.0,
+            "close": 328.5,
+            "volume": 3000.0,
+            "data_status": "ok",
+        })
+
+        sig = compute_orb_signal(
+            ticker="OGDC",
+            candles_1m=candles,
+            session_id="sess_cov",
+            notify=True,
+        )
+        assert sig is not None
+        assert sig.ticker == "OGDC"
+

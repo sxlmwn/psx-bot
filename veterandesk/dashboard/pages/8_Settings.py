@@ -21,7 +21,7 @@ try:
 except Exception as ex:
     st.warning(f"Could not load rules_config from Supabase: {ex}")
 
-tab1, tab2, tab3 = st.tabs(["Risk Thresholds (Supabase)", "PSX Fee Table", "Watchlist"])
+tab1, tab2, tab3, tab4 = st.tabs(["Risk Thresholds (Supabase)", "PSX Fee Table", "Watchlist", "Telegram Alerts"])
 
 with tab1:
     st.subheader("Hard Risk Parameters (Enforced in Database & Code)")
@@ -58,4 +58,25 @@ with tab2:
 with tab3:
     st.subheader("Liquid Watchlist")
     st.write(settings.watchlist)
+
+with tab4:
+    st.subheader("📲 Telegram Bot Alerts & Outbound Queue")
+    from veterandesk.alerts.telegram import get_delivery_stats
+    stats = get_delivery_stats()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Dispatched", stats["total"])
+    m2.metric("Delivered (Sent)", stats["sent"])
+    m3.metric("Pending In-Flight", stats["pending"])
+    m4.metric("Failed (Retries Exhausted)", stats["failed"], delta="Clean" if stats["failed"] == 0 else "Needs Review", delta_color="normal" if stats["failed"] == 0 else "inverse")
+
+    st.markdown("### Delivery Engine Guarantees")
+    st.markdown(
+        "- **Bot Target:** `@Veterandesk_bot`\n"
+        "- **Retry Policy:** Up to 3 attempts with exponential backoff (`0.5s`, `1.0s`, `2.0s`).\n"
+        "- **Rate Limit:** 1.0s minimum inter-message delay.\n"
+        "- **Persistence:** Every outbound alert logged to `telegram_delivery_log` (Supabase PostgreSQL / SQLite fallback).\n"
+        "- **Discipline Schedule:** Daily Brief at `9:15 AM PKT`, Session Summary at `3:45 PM PKT`."
+    )
+
 

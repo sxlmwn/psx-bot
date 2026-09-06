@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, field_validator
 
+from veterandesk.alerts.scheduler import create_alert_scheduler
+from veterandesk.alerts.telegram import telegram_service
 from veterandesk.config import settings
 from veterandesk.execution.graduation import compute_performance_metrics
 from veterandesk.execution.ledger import DoubleEntryLedger
@@ -24,9 +26,12 @@ from veterandesk.execution.paper_broker import PaperBroker
 from veterandesk.health.monitor import SystemHealthMonitor
 from veterandesk.journal.lessons import LessonsMemory
 from veterandesk.journal.post_mortem import PostMortemEngine
+from veterandesk.logging import get_logger
 from veterandesk.portfolio.manager import PortfolioManager
 from veterandesk.risk.engine import risk_engine
 from veterandesk.strategy.models import TradeSignal, SignalAction, SignalStatus
+
+logger = get_logger("veterandesk.api")
 
 # Initialize core services
 app = FastAPI(
@@ -41,6 +46,25 @@ portfolio_mgr = PortfolioManager()
 lessons_mem = LessonsMemory()
 post_mortem_engine = PostMortemEngine(lessons_memory=lessons_mem)
 health_monitor = SystemHealthMonitor(ledger=ledger)
+alert_scheduler = create_alert_scheduler(start=False)
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    try:
+        alert_scheduler.start()
+        logger.info("telegram_alert_scheduler_started")
+    except Exception as ex:
+        logger.warning("scheduler_startup_error", error=str(ex))
+
+
+@app.on_event("shutdown")
+def on_shutdown() -> None:
+    try:
+        alert_scheduler.shutdown(wait=False)
+        logger.info("telegram_alert_scheduler_shutdown")
+    except Exception as ex:
+        logger.warning("scheduler_shutdown_error", error=str(ex))
 
 
 from veterandesk.database import db_manager
@@ -182,6 +206,15 @@ def create_test_trade(req: Optional[TestTradeRequest] = None) -> Dict[str, Any]:
         shares=shares_to_execute
     )
 
+    try:
+        telegram_service.send_signal_alert(
+            signal=sig,
+            shares=shares_to_execute,
+            reason_lines=f"ORB breakout approved by Risk Engine.\nRisk allocated: {assessment.risk_pct_used:.2f}% equity.",
+        )
+    except Exception as ex:
+        logger.warning("telegram_signal_alert_failed", error=str(ex), signal_id=sig.signal_id)
+
     return {
         "status": "SUCCESS",
         "message": "Trade validated by Risk Engine and executed into live Supabase PostgreSQL",
@@ -286,6 +319,15 @@ def execute_trade_pipeline(req: ExecuteTradeRequest) -> Dict[str, Any]:
         scraped_price=req.entry_price,
         shares=assessment.approved_shares
     )
+
+    try:
+        telegram_service.send_signal_alert(
+            signal=sig,
+            shares=assessment.approved_shares,
+            reason_lines=f"ORB breakout approved by Risk Engine.\nRisk allocated: {assessment.risk_pct_used:.2f}% equity.",
+        )
+    except Exception as ex:
+        logger.warning("telegram_signal_alert_failed", error=str(ex), signal_id=sig.signal_id)
 
     return {
         "status": "APPROVED_AND_EXECUTED",

@@ -53,3 +53,36 @@ try:
         st.info("No heartbeat records found in `health_heartbeats` table.")
 except Exception as e:
     st.error(f"Failed to query `health_heartbeats` from Supabase: {e}")
+
+st.markdown("---")
+st.subheader("📲 Telegram Outbound Delivery & Outbox (`telegram_delivery_log`)")
+
+from veterandesk.alerts.telegram import get_delivery_stats
+
+stats = get_delivery_stats()
+t_col1, t_col2, t_col3, t_col4 = st.columns(4)
+t_col1.metric("Total Messages", stats["total"])
+t_col2.metric("Delivered (Sent)", stats["sent"], delta=f"{stats['sent']} delivered" if stats['sent'] > 0 else None)
+t_col3.metric("Pending In-Flight", stats["pending"])
+failed_val = stats["failed"]
+t_col4.metric(
+    "Failed (3x Retried)",
+    failed_val,
+    delta="🚨 Attention" if failed_val > 0 else "0 Failed (Clean)",
+    delta_color="inverse" if failed_val > 0 else "normal",
+    help="Messages that permanently failed after 3 exponential backoff attempts"
+)
+
+try:
+    res_tg = client.table("telegram_delivery_log").select("*").order("created_at", desc=True).limit(20).execute()
+    tg_rows = res_tg.data or []
+    if tg_rows:
+        df_tg = pd.DataFrame(tg_rows)
+        tg_display_cols = ["id", "message_type", "status", "attempts", "reference_id", "event_type", "last_error", "created_at", "sent_at", "failed_at"]
+        avail_tg_cols = [c for c in tg_display_cols if c in df_tg.columns]
+        st.dataframe(df_tg[avail_tg_cols], use_container_width=True)
+    else:
+        st.info("No outbound alerts logged yet in `telegram_delivery_log`.")
+except Exception as ex_tg:
+    st.warning(f"Could not load `telegram_delivery_log` from Supabase: {ex_tg}")
+
