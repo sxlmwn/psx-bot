@@ -8,10 +8,16 @@ while _project_root.parent != _project_root and not (_project_root / "veterandes
 if (_project_root / "veterandesk").is_dir() and str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+from datetime import datetime
 from typing import Any, Dict, List
 import pandas as pd
 import streamlit as st
 
+from veterandesk.dashboard.export import (
+    build_mistakes_dataframe,
+    generate_csv_export,
+    generate_excel_export,
+)
 from veterandesk.database.session import db_manager
 
 st.set_page_config(page_title="Mistakes & Audit | VeteranDesk", page_icon="🚨", layout="wide")
@@ -65,8 +71,31 @@ if mistakes_data:
         for m in mistakes_data
     ]
     st.dataframe(pd.DataFrame(table_data), use_container_width=True)
+
+    today_stamp = datetime.now().strftime("%Y-%m-%d")
+    df_mistakes_export = build_mistakes_dataframe(mistakes_data)
+    m_excel = generate_excel_export(df_mistakes_export, sheet_name="Audit_Mistakes")
+    m_csv = generate_csv_export(df_mistakes_export)
+    m_col1, m_col2 = st.columns(2)
+    m_col1.download_button(
+        label="📥 Download Audit Log (.xlsx)",
+        data=m_excel,
+        file_name=f"veterandesk_mistakes_export_{today_stamp}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+    m_col2.download_button(
+        label="📄 Download Audit Log (.csv)",
+        data=m_csv,
+        file_name=f"veterandesk_mistakes_export_{today_stamp}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 else:
     st.success("✅ Audit log clean in Supabase. Zero rule bypasses or execution discrepancies detected.")
+    m_col1, m_col2 = st.columns(2)
+    m_col1.button("📥 Download Audit Log (.xlsx)", disabled=True, use_container_width=True)
+    m_col2.button("📄 Download Audit Log (.csv)", disabled=True, use_container_width=True)
 
 st.info("""
 **Monitored Audit Rules:**

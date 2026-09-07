@@ -8,11 +8,17 @@ while _project_root.parent != _project_root and not (_project_root / "veterandes
 if (_project_root / "veterandesk").is_dir() and str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+from datetime import datetime
 from typing import Any, Dict, List
 import pandas as pd
 import streamlit as st
 
 from veterandesk.config import settings
+from veterandesk.dashboard.export import (
+    build_ledger_dataframe,
+    generate_csv_export,
+    generate_excel_export,
+)
 from veterandesk.database.session import db_manager
 
 st.set_page_config(page_title="Demo Account | VeteranDesk", page_icon="💼", layout="wide")
@@ -118,5 +124,28 @@ if ledger_entries:
     display_cols = ["id", "transaction_id", "trade_id", "account_name", "debit", "credit", "balance_after", "description", "created_at"]
     avail_cols = [c for c in display_cols if c in df_ledger.columns]
     st.dataframe(df_ledger[avail_cols], width="stretch")
+
+    today_stamp = datetime.now().strftime("%Y-%m-%d")
+    df_ledger_export = build_ledger_dataframe(ledger_entries)
+    ledg_excel = generate_excel_export(df_ledger_export, sheet_name="Double_Entry_Ledger")
+    ledg_csv = generate_csv_export(df_ledger_export)
+    l_col1, l_col2 = st.columns(2)
+    l_col1.download_button(
+        label="📥 Download Full Ledger (.xlsx)",
+        data=ledg_excel,
+        file_name=f"veterandesk_ledger_export_{today_stamp}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+    l_col2.download_button(
+        label="📄 Download Full Ledger (.csv)",
+        data=ledg_csv,
+        file_name=f"veterandesk_ledger_export_{today_stamp}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 else:
     st.info("No ledger records found in Supabase `demo_ledger` table.")
+    l_col1, l_col2 = st.columns(2)
+    l_col1.button("📥 Download Full Ledger (.xlsx)", disabled=True, use_container_width=True)
+    l_col2.button("📄 Download Full Ledger (.csv)", disabled=True, use_container_width=True)
