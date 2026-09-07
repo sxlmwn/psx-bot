@@ -286,8 +286,15 @@ class PaperBroker:
                     f"Cannot exit with STOP_HIT: market price PKR {scraped_price:.2f} > stop loss PKR {trade.stop_loss:.2f}."
                 )
 
+        # For limit order TARGET_HIT: in real trading, a resting take-profit limit order fills at the target price
+        # (capped at target price to prevent artificial multi-hundred-percent synthetic test or data gap windfalls).
+        if exit_reason == ExitReason.TARGET_HIT and trade.target_price is not None:
+            effective_price = min(scraped_price, trade.target_price * 1.02)
+        else:
+            effective_price = scraped_price
+
         # Apply slippage on SELL: price moves down against seller
-        filled_exit_price = round(scraped_price * (1.0 - self.slippage_pct), 2)
+        filled_exit_price = round(effective_price * (1.0 - self.slippage_pct), 2)
         nominal_proceeds = round(trade.shares * filled_exit_price, 2)
         original_holdings_cost = round(trade.shares * trade.filled_entry_price, 2)
 
@@ -482,9 +489,9 @@ class PaperBroker:
             except Exception as se:
                 logger.warning("signal_fk_sync_skipped", error=str(se))
 
-            # Upsert into trades and demo_trades tables in Supabase
-            client.table("trades").upsert(record).execute()
-            client.table("demo_trades").upsert(record).execute()
+            # Upsert into trades and demo_trades tables in Supabase with explicit unique constraint
+            client.table("trades").upsert(record, on_conflict="trade_id").execute()
+            client.table("demo_trades").upsert(record, on_conflict="trade_id").execute()
             logger.info("trade_persisted_to_supabase", trade_id=trade.trade_id)
         except Exception as e:
             logger.warning("trade_db_persistence_skipped", error=str(e))

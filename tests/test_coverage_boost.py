@@ -136,7 +136,7 @@ class TestCoverageExpansion:
         assert resp_l.status_code == 200
         assert isinstance(resp_l.json(), list)
 
-        # 5. execute trade pipeline (should pass through Risk Engine)
+        # 5. execute trade pipeline (should pass through Risk Engine without DB pollution)
         payload = {
             "ticker": "OGDC",
             "action": "BUY",
@@ -147,9 +147,11 @@ class TestCoverageExpansion:
             "confidence_pct": 75,
             "invalidation_reason": "Breakout invalidated",
         }
-        resp_exec = client.post("/trades/execute", json=payload)
-        # Depending on risk state, either 200 or 422
-        assert resp_exec.status_code in (200, 422)
+        from veterandesk.api.app import broker
+        with patch.object(broker, "persist_to_db", False):
+            resp_exec = client.post("/trades/execute", json=payload)
+            # Depending on risk state, either 200 or 422
+            assert resp_exec.status_code in (200, 422)
 
     def test_migration_runner_basic(self, tmp_path):
         # Test non-existent file
