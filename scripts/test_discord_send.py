@@ -56,7 +56,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from veterandesk.config import PKT_TZ, settings
+from veterandesk.config import PKT_TZ, settings, get_secret, get_bool_secret
 from veterandesk.alerts.discord_notifier import (
     DeliveryStatus,
     DiscordOutboundMessage,
@@ -112,8 +112,8 @@ def run_discord_test(
     print()
 
     # Determine credential source
-    env_webhook = settings.discord_webhook_url or os.environ.get("DISCORD_WEBHOOK_URL")
-    env_enabled = settings.discord_enabled
+    env_webhook = get_secret("DISCORD_WEBHOOK_URL", settings.discord_webhook_url)
+    env_enabled = get_bool_secret("DISCORD_ENABLED", settings.discord_enabled)
 
     webhook_url = (cli_webhook or env_webhook or "").strip()
     webhook_present = bool(webhook_url)

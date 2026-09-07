@@ -33,7 +33,7 @@ from veterandesk.alerts.validators import (
     validate_signal,
     validate_system_health_alert,
 )
-from veterandesk.config import settings
+from veterandesk.config import settings, get_secret, get_bool_secret
 from veterandesk.logging import get_logger
 from veterandesk.strategy.models import TradeSignal
 
@@ -96,11 +96,11 @@ class TelegramService:
         chat_id: Optional[str] = None,
         enabled: Optional[bool] = None,
     ) -> None:
-        # Read strictly from environment variables or settings, allowing explicit parameter overrides
-        self.bot_token = bot_token if bot_token is not None else (settings.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN"))
-        self.chat_id = chat_id if chat_id is not None else (settings.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID"))
+        # Read from Streamlit secrets, environment variables, or settings, allowing explicit parameter overrides
+        self.bot_token = bot_token if bot_token is not None else get_secret("TELEGRAM_BOT_TOKEN", settings.telegram_bot_token)
+        self.chat_id = chat_id if chat_id is not None else get_secret("TELEGRAM_CHAT_ID", settings.telegram_chat_id)
         
-        env_enabled = settings.telegram_enabled
+        env_enabled = get_bool_secret("TELEGRAM_ENABLED", settings.telegram_enabled)
         if enabled is not None:
             self.enabled = enabled
         else:

@@ -20,5 +20,5 @@ htmlcov/
 *.sqlite3
 *.log
 
-# Streamlit
-.streamlit/
+# Streamlit Local Secrets (NEVER commit secrets.toml)
+.streamlit/secrets.toml

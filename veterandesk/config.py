@@ -3,13 +3,86 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import time, timezone, timedelta
 from typing import Any, List, Optional
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, PydanticBaseSettingsSource
 
 # PSX Timezone is Pakistan Standard Time (PKT = UTC+5)
 PKT_TZ = timezone(timedelta(hours=5))
+
+
+def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
+    """
+    Retrieve secret with priority:
+    1. Streamlit Cloud Secrets (st.secrets["KEY"])
+    2. Environment variable (os.environ.get("KEY"))
+    3. Fallback default
+    """
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and st.secrets is not None:
+            if key in st.secrets:
+                val = st.secrets[key]
+                if val is not None:
+                    return str(val)
+            if key.upper() in st.secrets:
+                val = st.secrets[key.upper()]
+                if val is not None:
+                    return str(val)
+            if key.lower() in st.secrets:
+                val = st.secrets[key.lower()]
+                if val is not None:
+                    return str(val)
+    except Exception:
+        pass
+
+    val = os.environ.get(key) or os.environ.get(key.upper()) or os.environ.get(key.lower())
+    if val is not None:
+        return val
+
+    return default
+
+
+def get_bool_secret(key: str, default: bool = True) -> bool:
+    """Retrieve boolean flag from st.secrets or os.environ."""
+    raw = get_secret(key, None)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+class StreamlitSecretsSettingsSource(PydanticBaseSettingsSource):
+    """Pydantic settings source that loads secrets from st.secrets on Streamlit Cloud."""
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and st.secrets is not None:
+                candidates = [field_name, field_name.upper(), field_name.lower()]
+                if hasattr(field, "alias") and field.alias:
+                    candidates.insert(0, field.alias)
+                for cand in candidates:
+                    if cand in st.secrets:
+                        return st.secrets[cand], field_name, False
+        except Exception:
+            pass
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and st.secrets is not None:
+                for k, v in st.secrets.items():
+                    if isinstance(v, (str, int, float, bool, list, dict)):
+                        d[k] = v
+                        d[k.lower()] = v
+                        d[k.upper()] = v
+        except Exception:
+            pass
+        return d
 
 
 class FeeStructure(BaseSettings):
@@ -137,6 +210,23 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return [str(x).upper() for x in v]
         return []
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            StreamlitSecretsSettingsSource(settings_cls),
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+        )
 
 
 # Global singleton instances

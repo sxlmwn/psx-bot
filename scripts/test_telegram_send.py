@@ -57,7 +57,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from veterandesk.config import PKT_TZ, settings
+from veterandesk.config import PKT_TZ, settings, get_secret, get_bool_secret
 from veterandesk.alerts.telegram_notifier import (
     DeliveryStatus,
     MessageType,
@@ -110,9 +110,9 @@ def run_telegram_test(
     print()
 
     # Determine credential source
-    env_token = settings.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
-    env_chat_id = settings.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
-    env_enabled = settings.telegram_enabled
+    env_token = get_secret("TELEGRAM_BOT_TOKEN", settings.telegram_bot_token)
+    env_chat_id = get_secret("TELEGRAM_CHAT_ID", settings.telegram_chat_id)
+    env_enabled = get_bool_secret("TELEGRAM_ENABLED", settings.telegram_enabled)
 
     token = (cli_token or env_token or "").strip()
     chat_id = (cli_chat_id or env_chat_id or "").strip()

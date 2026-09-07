@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
     Client = None  # type: ignore
     create_client = None  # type: ignore
 
-from veterandesk.config import settings
+from veterandesk.config import settings, get_secret
 from veterandesk.logging import get_logger
 
 logger = get_logger("veterandesk.database")
@@ -31,9 +31,14 @@ class DatabaseManager:
     """
 
     def __init__(self) -> None:
-        self.supabase_url: Optional[str] = settings.supabase_url
+        self.supabase_url: Optional[str] = get_secret("SUPABASE_URL", settings.supabase_url)
         self.supabase_key: Optional[str] = (
-            settings.supabase_service_role_key or settings.supabase_key or settings.supabase_anon_key
+            get_secret("SUPABASE_SERVICE_ROLE_KEY")
+            or get_secret("SUPABASE_KEY")
+            or get_secret("SUPABASE_ANON_KEY")
+            or settings.supabase_service_role_key
+            or settings.supabase_key
+            or settings.supabase_anon_key
         )
         self.supabase_client: Optional[Any] = None
 
@@ -44,7 +49,7 @@ class DatabaseManager:
             except Exception as e:
                 logger.error("supabase_client_init_failed", error=str(e))
 
-        db_url = settings.database_url
+        db_url = get_secret("DATABASE_URL", settings.database_url) or "sqlite:///./veterandesk.db"
         if "+aiosqlite" in db_url:
             self.sync_db_url = db_url.replace("+aiosqlite", "")
         elif "+asyncpg" in db_url:
@@ -58,10 +63,21 @@ class DatabaseManager:
         """Return initialized Supabase client instance."""
         if self.supabase_client is not None:
             return self.supabase_client
+        if not self.supabase_url:
+            self.supabase_url = get_secret("SUPABASE_URL", settings.supabase_url)
+        if not self.supabase_key:
+            self.supabase_key = (
+                get_secret("SUPABASE_SERVICE_ROLE_KEY")
+                or get_secret("SUPABASE_KEY")
+                or get_secret("SUPABASE_ANON_KEY")
+                or settings.supabase_service_role_key
+                or settings.supabase_key
+                or settings.supabase_anon_key
+            )
         if self.supabase_url and self.supabase_key and create_client is not None:
             self.supabase_client = create_client(self.supabase_url, self.supabase_key)
             return self.supabase_client
-        raise RuntimeError("Supabase credentials not configured in settings.")
+        raise RuntimeError("Supabase credentials not configured in settings or st.secrets.")
 
     def get_engine(self) -> Engine:
         if self._engine is None:
@@ -73,6 +89,17 @@ class DatabaseManager:
         Execute a live health ping against the database.
         Returns detailed status including provider and latency.
         """
+        if not self.supabase_url:
+            self.supabase_url = get_secret("SUPABASE_URL", settings.supabase_url)
+        if not self.supabase_key:
+            self.supabase_key = (
+                get_secret("SUPABASE_SERVICE_ROLE_KEY")
+                or get_secret("SUPABASE_KEY")
+                or get_secret("SUPABASE_ANON_KEY")
+                or settings.supabase_service_role_key
+                or settings.supabase_key
+                or settings.supabase_anon_key
+            )
         is_supabase = bool(self.supabase_url and self.supabase_key)
         t0 = time.perf_counter()
 

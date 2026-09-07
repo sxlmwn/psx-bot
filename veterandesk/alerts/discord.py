@@ -34,7 +34,7 @@ from veterandesk.alerts.validators import (
     validate_signal,
     validate_system_health_alert,
 )
-from veterandesk.config import settings
+from veterandesk.config import settings, get_secret, get_bool_secret
 from veterandesk.logging import get_logger
 from veterandesk.strategy.models import TradeSignal
 
@@ -103,10 +103,10 @@ class DiscordService:
         self.webhook_url: Optional[str] = (
             webhook_url
             if webhook_url is not None
-            else (settings.discord_webhook_url or os.environ.get("DISCORD_WEBHOOK_URL"))
+            else get_secret("DISCORD_WEBHOOK_URL", settings.discord_webhook_url)
         )
 
-        env_enabled = settings.discord_enabled
+        env_enabled = get_bool_secret("DISCORD_ENABLED", settings.discord_enabled)
         if enabled is not None:
             self.enabled = enabled
         else:

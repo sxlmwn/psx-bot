@@ -8,6 +8,15 @@ Usage:
 """
 
 import sys
+from pathlib import Path
+
+# Ensure project root is on sys.path
+_project_root = Path(__file__).resolve().parent
+while _project_root.parent != _project_root and not (_project_root / "veterandesk").is_dir():
+    _project_root = _project_root.parent
+if (_project_root / "veterandesk").is_dir() and str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 import subprocess
 import uvicorn
 
@@ -47,21 +56,23 @@ def run_migrate() -> None:
 
 if __name__ == "__main__":
     import streamlit as st
-    if st.runtime.exists():
-        import runpy
-        runpy.run_path("veterandesk/dashboard/Home.py", run_name="__main__")
-        sys.exit(0)
+    from pathlib import Path
 
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "api"
-    if cmd == "api":
-        run_api()
-    elif cmd == "dashboard":
-        run_dashboard()
-    elif cmd == "test":
-        run_tests()
-    elif cmd == "migrate":
-        run_migrate()
+    if st.runtime.exists():
+        _home_path = Path(__file__).resolve().parent / "veterandesk" / "dashboard" / "Home.py"
+        with open(_home_path, encoding="utf-8") as _f:
+            exec(compile(_f.read(), str(_home_path), "exec"), globals())
     else:
-        print(f"Unknown command: {cmd}")
-        print("Valid commands: api | dashboard | test | migrate")
+        cmd = sys.argv[1] if len(sys.argv) > 1 else "api"
+        if cmd == "api":
+            run_api()
+        elif cmd == "dashboard":
+            run_dashboard()
+        elif cmd == "test":
+            run_tests()
+        elif cmd == "migrate":
+            run_migrate()
+        else:
+            print(f"Unknown command: {cmd}")
+            print("Valid commands: api | dashboard | test | migrate")
 

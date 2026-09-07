@@ -21,7 +21,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 from groq import Groq
 
-from veterandesk.config import settings
+from veterandesk.config import settings, get_secret
 from veterandesk.execution.paper_broker import DemoTrade
 from veterandesk.journal.lessons import LessonsMemory
 from veterandesk.logging import get_logger
@@ -184,7 +184,7 @@ class PostMortemEngine:
         Query Groq API (or deterministic fallback) to produce structured verdict.
         Uses model 'openai/gpt-oss-120b' with fallback to 'qwen/qwen3.6-27b'.
         """
-        groq_api_key = settings.groq_api_key or os.environ.get("GROQ_API_KEY")
+        groq_api_key = get_secret("GROQ_API_KEY", settings.groq_api_key)
         if not groq_api_key or settings.use_mock_llm_if_no_key:
             return self._generate_deterministic_fallback(record)
 
