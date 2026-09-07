@@ -46,11 +46,13 @@ class MistakeDetector:
         max_daily_trades: int = 3,
         entry_cutoff_pkt: time = time(15, 0, 0),
         force_close_pkt: time = time(15, 20, 0),
+        persist_to_db: bool = True,
     ) -> None:
         self.max_risk_pct = max_risk_pct
         self.max_daily_trades = max_daily_trades
         self.entry_cutoff_pkt = entry_cutoff_pkt
         self.force_close_pkt = force_close_pkt
+        self.persist_to_db = persist_to_db
         self.audit_log: List[DetectedMistake] = []
 
     def audit_trade(
@@ -138,32 +140,33 @@ class MistakeDetector:
                 rules=[m.rule_violated for m in mistakes],
             )
             self.audit_log.extend(mistakes)
-            self._persist_mistakes_to_db(mistakes)
+            if self.persist_to_db:
+                self._persist_mistakes_to_db(mistakes)
 
-            for m in mistakes:
-                try:
-                    from veterandesk.alerts.telegram import telegram_service
-                    telegram_service.send_mistake_alert(
-                        rule_violated=m.rule_violated,
-                        severity=m.severity.value,
-                        trade_id=m.trade_id,
-                        details=m.details,
-                        detected_at_str=m.detected_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                    )
-                except Exception as ex:
-                    logger.warning("telegram_mistake_alert_failed", error=str(ex), trade_id=m.trade_id)
+                for m in mistakes:
+                    try:
+                        from veterandesk.alerts.telegram import telegram_service
+                        telegram_service.send_mistake_alert(
+                            rule_violated=m.rule_violated,
+                            severity=m.severity.value,
+                            trade_id=m.trade_id,
+                            details=m.details,
+                            detected_at_str=m.detected_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        )
+                    except Exception as ex:
+                        logger.warning("telegram_mistake_alert_failed", error=str(ex), trade_id=m.trade_id)
 
-                try:
-                    from veterandesk.alerts.discord import discord_service
-                    discord_service.send_mistake_alert(
-                        rule_violated=m.rule_violated,
-                        severity=m.severity.value,
-                        trade_id=m.trade_id,
-                        details=m.details,
-                        detected_at_str=m.detected_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                    )
-                except Exception as ex:
-                    logger.warning("discord_mistake_alert_failed", error=str(ex), trade_id=m.trade_id)
+                    try:
+                        from veterandesk.alerts.discord import discord_service
+                        discord_service.send_mistake_alert(
+                            rule_violated=m.rule_violated,
+                            severity=m.severity.value,
+                            trade_id=m.trade_id,
+                            details=m.details,
+                            detected_at_str=m.detected_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        )
+                    except Exception as ex:
+                        logger.warning("discord_mistake_alert_failed", error=str(ex), trade_id=m.trade_id)
 
         return mistakes
 

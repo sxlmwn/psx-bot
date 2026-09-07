@@ -23,7 +23,8 @@ client = db_manager.get_client()
 # Fetch live ledger from Supabase
 ledger_entries: List[Dict[str, Any]] = []
 try:
-    res_ledger = client.table("demo_ledger").select("*").order("id", desc=True).limit(100).execute()
+    # Fetch all ledger records in chronological order for exact balance and invariant reconciliation
+    res_ledger = client.table("demo_ledger").select("*").order("id", desc=False).limit(5000).execute()
     ledger_entries = res_ledger.data or []
 except Exception as err:
     st.error(f"Failed to fetch ledger from Supabase: {err}")
@@ -111,9 +112,11 @@ else:
 st.markdown("---")
 st.subheader("Live Double-Entry Ledger Audit Log (Supabase PostgreSQL: `demo_ledger`)")
 if ledger_entries:
-    df_ledger = pd.DataFrame(ledger_entries)
+    # Display the latest 100 entries in reverse chronological order
+    recent_entries = list(reversed(ledger_entries))[:100]
+    df_ledger = pd.DataFrame(recent_entries)
     display_cols = ["id", "transaction_id", "trade_id", "account_name", "debit", "credit", "balance_after", "description", "created_at"]
     avail_cols = [c for c in display_cols if c in df_ledger.columns]
-    st.dataframe(df_ledger[avail_cols], use_container_width=True)
+    st.dataframe(df_ledger[avail_cols], width="stretch")
 else:
     st.info("No ledger records found in Supabase `demo_ledger` table.")

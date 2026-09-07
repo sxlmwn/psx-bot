@@ -13,7 +13,7 @@ from veterandesk.strategy.models import SignalAction
 
 class TestMistakeDetector:
     def test_detects_no_stop_loss(self):
-        detector = MistakeDetector()
+        detector = MistakeDetector(persist_to_db=False)
         # Direct object creation to test audit resilience
         trade = DemoTrade.__new__(DemoTrade)
         trade.trade_id = "TRD_BAD"
@@ -32,7 +32,7 @@ class TestMistakeDetector:
         assert any(m.rule_violated == "NO_STOP_LOSS" for m in mistakes)
 
     def test_detects_oversize_risk(self):
-        detector = MistakeDetector(max_risk_pct=1.00)
+        detector = MistakeDetector(max_risk_pct=1.00, persist_to_db=False)
         trade = DemoTrade(
             trade_id="TRD_OVERSIZE",
             signal_id="SIG_1",
@@ -56,7 +56,7 @@ class TestMistakeDetector:
         assert any(m.rule_violated == "OVERSIZE_RISK_LIMIT_EXCEEDED" for m in mistakes)
 
     def test_detects_late_entry_after_cutoff(self):
-        detector = MistakeDetector(entry_cutoff_pkt=time(15, 0, 0))
+        detector = MistakeDetector(entry_cutoff_pkt=time(15, 0, 0), persist_to_db=False)
         trade = DemoTrade(
             trade_id="TRD_LATE",
             signal_id="SIG_1",
