@@ -16,6 +16,7 @@ Target: 100% coverage including all boundary conditions:
 
 import pytest
 from datetime import time
+from unittest.mock import patch, MagicMock
 from veterandesk.risk.rules import (
     check_per_trade_risk,
     check_daily_loss_limit,
@@ -255,3 +256,94 @@ class TestRiskEnginePipeline:
 
         with pytest.raises(ValueError, match="max_daily_loss_pct cannot exceed 5.00%"):
             RiskEngine(max_daily_loss_pct=6.0)
+
+    def test_daily_halt_alert_uses_real_loss_value(self):
+        """Test that daily halt alert always uses the real current_day_realized_loss value, never a hardcoded fallback."""
+        from datetime import datetime, timezone
+
+        engine = RiskEngine(
+            max_risk_per_trade_pct=1.00,
+            max_daily_loss_pct=2.00,
+            max_intraday_trades=3,
+            entry_cutoff_pkt=time(15, 0, 0),
+            force_close_pkt=time(15, 20, 0),
+            max_adv_pct=5.00,
+            lot_size=1
+        )
+
+        sig = TradeSignal(
+            signal_id="TEST_SIG_1",
+            ticker="OGDC",
+            entry_price=100.0,
+            stop_loss=95.0,
+            target_price=107.5,
+            reward_risk_ratio=1.5,
+            position_size=0,
+            confidence_pct=60,
+            invalidation_reason="Test invalidation",
+            created_at=datetime.now(timezone.utc),
+            session_id="test_sess"
+        )
+
+        # Test with a specific loss amount that would trigger halt (2% of 500,000 = 10,000)
+        test_loss_amount = 10500.0
+
+        with patch('veterandesk.alerts.telegram.telegram_service') as mock_telegram, \
+             patch('veterandesk.alerts.discord.discord_service') as mock_discord:
+            mock_telegram.send_daily_halt_alert = MagicMock()
+            mock_discord.send_daily_halt_alert = MagicMock()
+
+            assessment = engine.evaluate_signal(
+                signal=sig,
+                account_balance=500000.0,
+                current_day_realized_loss=test_loss_amount,
+                trades_executed_today=1,
+                current_time_pkt=time(10, 30, 0),
+                twenty_day_adv=100000.0,
+                open_positions=[],
+                is_already_halted=False
+            )
+
+            # Verify halt was triggered
+            assert assessment.is_approved is False
+            assert any("daily limit" in r for r in assessment.rejection_reasons)
+
+            # Verify alert services were called
+            mock_telegram.send_daily_halt_alert.assert_called_once()
+            mock_discord.send_daily_halt_alert.assert_called_once()
+
+            # Extract the loss_amount_pkr argument from the calls
+            telegram_call_kwargs = mock_telegram.send_daily_halt_alert.call_args[1]
+            discord_call_kwargs = mock_discord.send_daily_halt_alert.call_args[1]
+
+            # CRITICAL ASSERTION: The alert must use the REAL loss value, never a hardcoded fallback
+            assert telegram_call_kwargs['loss_amount_pkr'] == test_loss_amount, \
+                f"Telegram alert received {telegram_call_kwargs['loss_amount_pkr']}, expected {test_loss_amount}"
+            assert discord_call_kwargs['loss_amount_pkr'] == test_loss_amount, \
+                f"Discord alert received {discord_call_kwargs['loss_amount_pkr']}, expected {test_loss_amount}"
+
+        # Test edge case: exactly at the 2% threshold (10,000 PKR on 500,000 balance)
+        exact_threshold_loss = 10000.0
+        with patch('veterandesk.alerts.telegram.telegram_service') as mock_telegram, \
+             patch('veterandesk.alerts.discord.discord_service') as mock_discord:
+            mock_telegram.send_daily_halt_alert = MagicMock()
+            mock_discord.send_daily_halt_alert = MagicMock()
+
+            assessment = engine.evaluate_signal(
+                signal=sig,
+                account_balance=500000.0,
+                current_day_realized_loss=exact_threshold_loss,
+                trades_executed_today=1,
+                current_time_pkt=time(10, 30, 0),
+                twenty_day_adv=100000.0,
+                open_positions=[],
+                is_already_halted=False
+            )
+
+            assert assessment.is_approved is False
+
+            telegram_call_kwargs = mock_telegram.send_daily_halt_alert.call_args[1]
+            discord_call_kwargs = mock_discord.send_daily_halt_alert.call_args[1]
+
+            assert telegram_call_kwargs['loss_amount_pkr'] == exact_threshold_loss
+            assert discord_call_kwargs['loss_amount_pkr'] == exact_threshold_loss
