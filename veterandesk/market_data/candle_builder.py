@@ -84,11 +84,15 @@ def build_candles_from_ticks(
         high_price = max(float(t["price"]) for t in bucket_ticks)
         low_price = min(float(t["price"]) for t in bucket_ticks)
 
-        # In DPS, volume reported is cumulative intraday volume.
-        # Volume of a candle is the delta from the start of the bucket to the end.
+        # Volume handling:
+        # If ticks are monotonically increasing cumulative volumes, candle volume is the delta (vol_end - vol_start).
+        # Otherwise (e.g. individual trade-level tick volumes from DPS timeseries), candle volume is the sum.
         vol_start = int(bucket_ticks[0]["volume"])
         vol_end = int(bucket_ticks[-1]["volume"])
-        candle_vol = max(0, vol_end - vol_start)
+        if len(bucket_ticks) > 1 and all(int(bucket_ticks[i]["volume"]) <= int(bucket_ticks[i+1]["volume"]) for i in range(len(bucket_ticks) - 1)) and vol_end > vol_start:
+            candle_vol = vol_end - vol_start
+        else:
+            candle_vol = sum(int(t.get("volume", 0)) for t in bucket_ticks)
 
         # Status is degraded if any tick was degraded
         status = "ok"

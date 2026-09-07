@@ -89,6 +89,52 @@ class PaperBroker:
         self.open_trades: Dict[str, DemoTrade] = {}
         self.closed_trades: List[DemoTrade] = []
 
+    def load_open_trades_from_db(self) -> int:
+        """
+        Load active OPEN trades from Supabase PostgreSQL database into in-memory broker state.
+        Ensures state recovery on worker restart.
+        """
+        if not self.persist_to_db:
+            return 0
+        try:
+            from veterandesk.database.session import db_manager
+            client = db_manager.get_client()
+            res = client.table("trades").select("*").eq("status", "OPEN").execute()
+            loaded = 0
+            for row in (res.data or []):
+                trade_id = row.get("trade_id")
+                if not trade_id or trade_id in self.open_trades:
+                    continue
+                action_str = row.get("action", "BUY").upper()
+                action = SignalAction.BUY if action_str == "BUY" else SignalAction.SELL
+                opened_at_raw = row.get("opened_at")
+                opened_at = datetime.fromisoformat(opened_at_raw) if opened_at_raw else datetime.now(timezone.utc)
+                trade = DemoTrade(
+                    trade_id=trade_id,
+                    signal_id=row.get("signal_id", f"SIG_{trade_id}"),
+                    ticker=row.get("ticker", "UNKNOWN"),
+                    action=action,
+                    shares=int(row.get("shares", 0)),
+                    entry_price=float(row.get("entry_price", 0.0)),
+                    stop_loss=float(row.get("stop_loss", 0.0)),
+                    target_price=float(row.get("target_price", 0.0)),
+                    slippage_pct=float(row.get("slippage_pct", self.slippage_pct)),
+                    filled_entry_price=float(row.get("entry_price", 0.0)),
+                    status=TradeStatus.OPEN,
+                    opened_at=opened_at,
+                    entry_fees=float(row.get("fees_paid", 0.0)),
+                    fee_version=row.get("fee_version", "PSX_STANDARD_v1"),
+                    session_id=row.get("session_id", "default_session"),
+                )
+                self.open_trades[trade_id] = trade
+                loaded += 1
+            if loaded > 0:
+                logger.info("recovered_open_trades_from_db", count=loaded)
+            return loaded
+        except Exception as e:
+            logger.warning("failed_to_load_open_trades_from_db", error=str(e))
+            return 0
+
     def execute_buy(
         self,
         signal: TradeSignal,

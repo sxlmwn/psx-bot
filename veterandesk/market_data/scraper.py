@@ -105,6 +105,90 @@ class PSXDpsScraper:
         )
         return None
 
+    def fetch_intraday_data(
+        self,
+        ticker: str,
+        timeframe_minutes: int = 1,
+    ) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Fetch full intraday timeseries from DPS and construct both:
+        1. Validated latest quote dictionary
+        2. Chronological 1-minute OHLCV candles
+        """
+        sym = ticker.upper()
+        url = f"{self.base_url}/timeseries/int/{sym}"
+        headers = self._get_headers()
+
+        last_err: Optional[Exception] = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                scraped_at = datetime.now(timezone.utc)
+                resp = self.session.get(url, headers=headers, timeout=self.timeout)
+
+                if resp.status_code == 200:
+                    self.gap_detector.record_success()
+                    quote = self._parse_quote_response(sym, resp, scraped_at)
+                    candles = self._build_candles_from_response(sym, resp, timeframe_minutes)
+                    return quote, candles
+
+                if resp.status_code == 429:
+                    logger.warning("dps_rate_limited", attempt=attempt, ticker=sym)
+                    time.sleep(2.0 * attempt)
+                    continue
+
+                resp.raise_for_status()
+
+            except Exception as e:
+                last_err = e
+                backoff_sec = (0.5 * (2 ** (attempt - 1))) + random.uniform(0.1, 0.4)
+                logger.warning(
+                    "dps_scrape_retry",
+                    attempt=attempt,
+                    ticker=sym,
+                    error=str(e),
+                    backoff_sec=round(backoff_sec, 2),
+                )
+                time.sleep(backoff_sec)
+
+        health_state = self.gap_detector.record_failure(str(last_err))
+        logger.error(
+            "dps_scrape_failed",
+            ticker=sym,
+            failures=health_state.consecutive_failures,
+            halted=health_state.is_halt_triggered,
+            error=str(last_err),
+        )
+        return None, []
+
+    def _build_candles_from_response(
+        self,
+        ticker: str,
+        response: requests.Response,
+        timeframe_minutes: int = 1,
+    ) -> List[Dict[str, Any]]:
+        from veterandesk.market_data.candle_builder import build_candles_from_ticks
+        try:
+            if "application/json" in response.headers.get("Content-Type", ""):
+                json_data = response.json()
+                if isinstance(json_data, dict) and "data" in json_data and isinstance(json_data["data"], list):
+                    points = json_data["data"]
+                    ticks = []
+                    for p in points:
+                        if len(p) >= 3:
+                            ts = datetime.fromtimestamp(int(p[0]), tz=timezone.utc)
+                            ticks.append({
+                                "ticker": ticker,
+                                "price": float(p[1]),
+                                "volume": int(p[2]),
+                                "psx_timestamp": ts,
+                                "data_status": "ok",
+                            })
+                    candles = build_candles_from_ticks(ticks, timeframe_minutes=timeframe_minutes)
+                    return [c.to_dict() for c in candles]
+        except Exception as e:
+            logger.warning("build_candles_from_response_failed", ticker=ticker, error=str(e))
+        return []
+
     def _parse_quote_response(
         self,
         ticker: str,
