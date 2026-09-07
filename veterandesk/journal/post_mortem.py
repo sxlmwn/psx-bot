@@ -210,7 +210,7 @@ class PostMortemEngine:
         )
 
         def _call_groq(model_name: str) -> Optional[str]:
-            client = Groq()
+            client = Groq(api_key=groq_api_key)
             completion = client.chat.completions.create(
                 model=model_name,
                 messages=[
