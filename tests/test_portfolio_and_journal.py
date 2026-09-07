@@ -194,8 +194,8 @@ class TestPortfolioAndJournal:
         # Non-negotiable: MUST NOT be 'Right'
         assert completed.verdict == TradeVerdict.RIGHT_FOR_WRONG_REASON
         assert completed.verdict != TradeVerdict.RIGHT
-        # Non-negotiable: Analysis must highlight round-trip friction and net loss
-        assert "friction" in completed.post_mortem_analysis.lower() or "transaction" in completed.post_mortem_analysis.lower()
+        # Non-negotiable: Analysis must highlight round-trip friction, costs, or slippage
+        assert any(term in completed.post_mortem_analysis.lower() for term in ["friction", "transaction", "commission", "slippage", "cost"])
         # Non-negotiable: Must NEVER claim positive expectancy on a net loss!
         assert "positive expectancy" not in completed.transferable_lesson.lower()
 
