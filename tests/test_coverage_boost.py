@@ -184,25 +184,24 @@ class TestCoverageExpansion:
         })
         assert engine._parse_and_apply_llm_response(rec, invalid_json) is False
 
-        # 3. Mock Anthropic 200 response
+        # 3. Mock Groq 200 response
         valid_json_text = json.dumps({
             "verdict": "Right",
             "analysis": "Flawless trade.",
             "transferable_lesson": "Follow rules.",
         })
-        with patch("veterandesk.config.settings.anthropic_api_key", "sk-ant-test"):
-            with patch("veterandesk.config.settings.use_mock_llm_if_no_key", False):
-                with patch("httpx.AsyncClient.post") as mock_llm_post:
-                    mock_resp = MagicMock()
-                    mock_resp.status_code = 200
-                    mock_resp.json.return_value = {
-                        "content": [{"text": valid_json_text}]
-                    }
-                    mock_llm_post.return_value = mock_resp
+        with patch("veterandesk.journal.post_mortem.Groq") as mock_groq_cls:
+            mock_client = MagicMock()
+            mock_resp = MagicMock()
+            mock_choice = MagicMock()
+            mock_choice.message.content = valid_json_text
+            mock_resp.choices = [mock_choice]
+            mock_client.chat.completions.create.return_value = mock_resp
+            mock_groq_cls.return_value = mock_client
 
-                    success = await engine._generate_post_mortem(rec)
-                    assert success is True
-                    assert rec.verdict == TradeVerdict.RIGHT
+            success = await engine._generate_post_mortem(rec)
+            assert success is True
+            assert rec.verdict == TradeVerdict.RIGHT
 
     def test_paper_broker_invalid_buy_conditions(self):
         ledger = DoubleEntryLedger(starting_balance_pkr=1000.0)
