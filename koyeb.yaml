@@ -1,0 +1,28 @@
+# Koyeb App and Service Deployment Specification
+name: psx-bot
+services:
+  - name: veterandesk-trading-bot
+    type: web
+    instance_type: nano
+    regions:
+      - fra
+    ports:
+      - port: 8000
+        path: /
+    routes:
+      - path: /
+        port: 8000
+    health_checks:
+      - port: 8000
+        http:
+          path: /health
+          method: GET
+        interval: 30
+        timeout: 5
+        unhealthy_threshold: 3
+        healthy_threshold: 1
+    env:
+      - key: PORT
+        value: "8000"
+      - key: ENVIRONMENT
+        value: "production"

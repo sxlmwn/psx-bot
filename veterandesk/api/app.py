@@ -53,6 +53,14 @@ alert_scheduler = create_alert_scheduler(start=False)
 @app.on_event("startup")
 def on_startup() -> None:
     try:
+        from apscheduler.triggers.interval import IntervalTrigger
+        alert_scheduler.add_job(
+            health_monitor.run_heartbeat,
+            trigger=IntervalTrigger(seconds=settings.heartbeat_interval_seconds),
+            id="system_health_heartbeat",
+            name="System Health Heartbeat (60s)",
+            replace_existing=True,
+        )
         alert_scheduler.start()
         logger.info("telegram_alert_scheduler_started")
     except Exception as ex:
@@ -71,12 +79,34 @@ def on_shutdown() -> None:
 from veterandesk.database import db_manager
 
 
+@app.get("/", tags=["System"])
+def root() -> Dict[str, Any]:
+    """Root status endpoint for Koyeb/cloud health probes."""
+    return {
+        "app": settings.app_name,
+        "version": settings.app_version,
+        "status": "ONLINE",
+        "service": "koyeb-trading-engine",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.get("/health", tags=["System"])
 def get_health() -> Dict[str, Any]:
     """Get system health heartbeats and overall status."""
-    statuses = health_monitor.run_heartbeat()
-    is_down = health_monitor.is_system_down()
-    db_check = db_manager.check_connection()
+    try:
+        statuses = health_monitor.run_heartbeat()
+        is_down = health_monitor.is_system_down()
+    except Exception as ex:
+        logger.warning("health_heartbeat_error", error=str(ex))
+        statuses = health_monitor.components
+        is_down = False
+
+    try:
+        db_check = db_manager.check_connection()
+    except Exception as ex:
+        db_check = {"status": "RED", "latency_ms": 0.0, "message": f"Check error: {ex}"}
+
     return {
         "status": "RED" if is_down else "GREEN",
         "is_system_down": is_down,
