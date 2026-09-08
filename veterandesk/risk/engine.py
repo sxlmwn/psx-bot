@@ -7,10 +7,10 @@ Non-negotiable rule: ANY single failure blocks trade execution immediately.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, date
 from typing import Any, List, Optional
 
-from veterandesk.config import settings
+from veterandesk.config import PKT_TZ, settings
 from veterandesk.logging import get_logger
 from veterandesk.risk.rules import (
     RuleResult,
@@ -25,6 +25,60 @@ from veterandesk.risk.rules import (
 from veterandesk.strategy.models import TradeSignal, SignalStatus
 
 logger = get_logger("veterandesk.risk_engine")
+
+
+def check_daily_halt_from_db(halt_date: date) -> bool:
+    """
+    Query the daily_halts table to determine if trading is halted for a given date.
+    Returns True if a halt record exists with is_halted=True for that date.
+    """
+    try:
+        from veterandesk.database.session import db_manager
+        client = db_manager.get_client()
+        res = client.table("daily_halts").select("*").eq("halt_date", str(halt_date)).execute()
+        if res.data:
+            halt_record = res.data[0]
+            is_halted: bool = halt_record.get("is_halted", False)
+            logger.info("daily_halt_state_retrieved", date=str(halt_date), is_halted=is_halted)
+            return is_halted
+        return False
+    except Exception as ex:
+        logger.warning("daily_halt_db_query_failed", date=str(halt_date), error=str(ex))
+        # Fail-safe: if DB query fails, assume NOT halted to avoid false halts
+        return False
+
+
+def record_daily_halt(
+    halt_date: date,
+    loss_amount: float,
+    loss_pct: float,
+    reason: str = "Daily loss limit breached",
+) -> None:
+    """
+    Record a daily halt event to the database.
+    This ensures halt state persists across process restarts.
+    """
+    try:
+        from veterandesk.database.session import db_manager
+        client = db_manager.get_client()
+        now_utc = datetime.now(PKT_TZ).astimezone(PKT_TZ).isoformat()
+        record = {
+            "halt_date": str(halt_date),
+            "is_halted": True,
+            "reason": reason,
+            "triggered_at": now_utc,
+            "loss_amount": loss_amount,
+            "loss_pct": loss_pct,
+        }
+        client.table("daily_halts").upsert(record, on_conflict="halt_date").execute()
+        logger.info(
+            "daily_halt_recorded",
+            date=str(halt_date),
+            loss_amount=loss_amount,
+            loss_pct=loss_pct,
+        )
+    except Exception as ex:
+        logger.error("daily_halt_db_write_failed", date=str(halt_date), error=str(ex))
 
 
 @dataclass(frozen=True)
@@ -92,12 +146,24 @@ class RiskEngine:
         )
         results.append(res_loss)
         if not res_loss.passed:
+            # Calculate loss percentage for alert and DB record
+            loss_pct = (current_day_realized_loss / account_balance * 100.0) if account_balance > 0 else self.max_daily_loss_pct
+            actual_loss_pct = max(loss_pct, self.max_daily_loss_pct)
+            
+            # Record halt to database for persistence across restarts
+            current_pkt_date = datetime.now(PKT_TZ).date()
+            record_daily_halt(
+                halt_date=current_pkt_date,
+                loss_amount=current_day_realized_loss,
+                loss_pct=actual_loss_pct,
+                reason="Daily loss limit breached",
+            )
+            
             try:
                 from veterandesk.alerts.telegram import telegram_service
-                loss_pct = (current_day_realized_loss / account_balance * 100.0) if account_balance > 0 else self.max_daily_loss_pct
                 t_str = current_time_pkt.strftime("%H:%M:%S PKT") if current_time_pkt else None
                 telegram_service.send_daily_halt_alert(
-                    loss_pct=max(loss_pct, self.max_daily_loss_pct),
+                    loss_pct=actual_loss_pct,
                     max_loss_pct=self.max_daily_loss_pct,
                     loss_amount_pkr=current_day_realized_loss,
                     halt_time_pkt=t_str,
@@ -108,10 +174,9 @@ class RiskEngine:
 
             try:
                 from veterandesk.alerts.discord import discord_service
-                loss_pct = (current_day_realized_loss / account_balance * 100.0) if account_balance > 0 else self.max_daily_loss_pct
                 t_str = current_time_pkt.strftime("%H:%M:%S PKT") if current_time_pkt else None
                 discord_service.send_daily_halt_alert(
-                    loss_pct=max(loss_pct, self.max_daily_loss_pct),
+                    loss_pct=actual_loss_pct,
                     max_loss_pct=self.max_daily_loss_pct,
                     loss_amount_pkr=current_day_realized_loss,
                     halt_time_pkt=t_str,

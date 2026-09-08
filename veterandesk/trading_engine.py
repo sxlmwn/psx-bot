@@ -26,7 +26,7 @@ from veterandesk.execution.ledger import DoubleEntryLedger
 from veterandesk.execution.paper_broker import DemoTrade, ExitReason, PaperBroker
 from veterandesk.logging import get_logger
 from veterandesk.market_data.scraper import PSXDpsScraper
-from veterandesk.risk.engine import RiskEngine
+from veterandesk.risk.engine import RiskEngine, check_daily_halt_from_db
 from veterandesk.strategy.models import SignalStatus, TradeSignal
 from veterandesk.strategy.orb import compute_orb_signal
 
@@ -105,6 +105,12 @@ class TradingEngine:
             self.broker.load_open_trades_from_db()
             for t in self.broker.open_trades.values():
                 self.tickers_traded_today.add(t.ticker)
+
+    def _is_already_halted_today(self) -> bool:
+        """Check if trading is already halted for the current PKT date."""
+        if self.current_session_date is None:
+            return False
+        return check_daily_halt_from_db(self.current_session_date)
 
     def check_open_positions_for_exits(self, now_pkt: datetime) -> List[DemoTrade]:
         """
@@ -332,6 +338,7 @@ class TradingEngine:
             open_pos = [{"ticker": t.ticker, "shares": t.shares} for t in self.broker.open_trades.values()]
             realized_loss = abs(min(0.0, self.ledger.realized_pnl))
             trades_today = len(self.broker.closed_trades) + len(self.broker.open_trades)
+            is_already_halted = self._is_already_halted_today()
 
             assessment = self.risk_engine.evaluate_signal(
                 signal=signal,
@@ -341,6 +348,7 @@ class TradingEngine:
                 current_time_pkt=now_pkt.time(),
                 twenty_day_adv=5000000.0,
                 open_positions=open_pos,
+                is_already_halted=is_already_halted,
             )
 
             if not assessment.is_approved:

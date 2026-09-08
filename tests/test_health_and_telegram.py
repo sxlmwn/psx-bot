@@ -571,20 +571,22 @@ class TestHookPointsIntegration:
 
     def test_apscheduler_jobs_dispatch(self) -> None:
         with patch.object(telegram_service, "send_daily_brief", return_value=True) as mock_brief:
-            ok_brief = run_daily_brief_job(date_str="2026-09-06")
-            assert ok_brief is True
-            mock_brief.assert_called_once()
+            with patch('veterandesk.alerts.scheduler._check_already_sent_today', return_value=False):
+                ok_brief = run_daily_brief_job(date_str="2026-09-06")
+                assert ok_brief is True
+                mock_brief.assert_called_once()
 
         with patch.object(telegram_service, "send_session_summary", return_value=True) as mock_summary:
-            ok_summary = run_session_summary_job(session_date="2026-09-06", trades_count=2, net_pnl=2500.0)
-            assert ok_summary is True
-            mock_summary.assert_called_once()
+            with patch('veterandesk.alerts.scheduler._check_already_sent_today', return_value=False):
+                ok_summary = run_session_summary_job(session_date="2026-09-06", trades_count=2, net_pnl=2500.0)
+                assert ok_summary is True
+                mock_summary.assert_called_once()
 
         # Verify scheduler creation
         sched = create_alert_scheduler(start=False)
         job_ids = [j.id for j in sched.get_jobs()]
-        assert "telegram_daily_brief" in job_ids
-        assert "telegram_session_summary" in job_ids
+        assert "daily_brief" in job_ids
+        assert "session_summary" in job_ids
 
     def test_delivery_stats_query(self) -> None:
         stats = get_delivery_stats()

@@ -372,10 +372,11 @@ class TestDiscordAlerts:
 
         with patch.object(telegram_service, "send_daily_brief", tg_mock):
             with patch.object(discord_service, "send_daily_brief", dc_mock):
-                res = run_daily_brief_job(date_str="2026-09-06")
-                assert res is True
-                assert tg_mock.called
-                assert dc_mock.called
+                with patch('veterandesk.alerts.scheduler._check_already_sent_today', return_value=False):
+                    res = run_daily_brief_job(date_str="2026-09-06")
+                    assert res is True
+                    assert tg_mock.called
+                    assert dc_mock.called
 
         # Case 2: Discord fails with exception, Telegram succeeds
         tg_mock2 = MagicMock(return_value=True)
@@ -383,10 +384,11 @@ class TestDiscordAlerts:
 
         with patch.object(telegram_service, "send_daily_brief", tg_mock2):
             with patch.object(discord_service, "send_daily_brief", dc_mock2):
-                res2 = run_daily_brief_job(date_str="2026-09-06")
-                assert res2 is True
-                assert tg_mock2.called
-                assert dc_mock2.called
+                with patch('veterandesk.alerts.scheduler._check_already_sent_today', return_value=False):
+                    res2 = run_daily_brief_job(date_str="2026-09-06")
+                    assert res2 is True
+                    assert tg_mock2.called
+                    assert dc_mock2.called
 
     # =========================================================================
     # 7. DELIVERY STATS

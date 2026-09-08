@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 from veterandesk.alerts.discord import discord_service
 from veterandesk.alerts.telegram import telegram_service
@@ -17,6 +18,49 @@ from veterandesk.logging import get_logger
 logger = get_logger("veterandesk.scheduler")
 
 
+def _check_already_sent_today(message_type: str, date_str: str) -> bool:
+    """
+    Check if a message of the given type was already sent today.
+    Uses delivery logs to prevent duplicate sends after process restarts.
+    
+    Args:
+        message_type: "DAILY_BRIEF" or "SESSION_SUMMARY"
+        date_str: Date string in YYYY-MM-DD format
+        
+    Returns:
+        True if already sent today, False otherwise
+    """
+    try:
+        from veterandesk.database.session import db_manager
+        
+        # Map message types to the reference_id format used by telegram/discord services
+        # Telegram uses: BRIEF_{date} and SUMMARY_{date}
+        # Discord uses: BRIEF_{date} and SUMMARY_{date}
+        reference_id_prefix = "BRIEF" if message_type == "DAILY_BRIEF" else "SUMMARY"
+        reference_id = f"{reference_id_prefix}_{date_str}"
+        
+        # Check Telegram delivery log
+        client = db_manager.get_client()
+        res = client.table("telegram_delivery_log").select("*").eq("message_type", message_type).eq("reference_id", reference_id).execute()
+        
+        if res.data and any(r.get("status") == "sent" for r in res.data):
+            logger.info("message_already_sent_today", message_type=message_type, date=date_str, service="telegram")
+            return True
+            
+        # Check Discord delivery log
+        res_discord = client.table("discord_delivery_log").select("*").eq("message_type", message_type).eq("reference_id", reference_id).execute()
+        
+        if res_discord.data and any(r.get("status") == "sent" for r in res_discord.data):
+            logger.info("message_already_sent_today", message_type=message_type, date=date_str, service="discord")
+            return True
+            
+        return False
+    except Exception as e:
+        logger.warning("failed_to_check_delivery_log", message_type=message_type, date=date_str, error=str(e))
+        # Fail-safe: if check fails, assume not sent to avoid blocking legitimate sends
+        return False
+
+
 def run_daily_brief_job(
     date_str: Optional[str] = None,
     watchlist_data: Optional[List[Dict[str, Any]]] = None,
@@ -24,9 +68,15 @@ def run_daily_brief_job(
 ) -> bool:
     """
     Scheduled 9:15 AM PKT Job: Formats and dispatches pre-market briefing.
+    Includes idempotency check to prevent duplicate sends after restarts.
     """
     now_pkt = datetime.now(PKT_TZ)
     today_str = date_str or now_pkt.strftime("%Y-%m-%d")
+
+    # Idempotency check: skip if already sent today
+    if _check_already_sent_today("DAILY_BRIEF", today_str):
+        logger.info("daily_brief_already_sent_today", date=today_str, skipped=True)
+        return True  # Return True since the job effectively "succeeded" (was already sent)
 
     # Build default watchlist snapshot if none provided
     if not watchlist_data:
@@ -85,9 +135,15 @@ def run_session_summary_job(
 ) -> bool:
     """
     Scheduled 3:45 PM PKT Job: Formats and dispatches post-market session summary.
+    Includes idempotency check to prevent duplicate sends after restarts.
     """
     now_pkt = datetime.now(PKT_TZ)
     date_str = session_date or now_pkt.strftime("%Y-%m-%d")
+
+    # Idempotency check: skip if already sent today
+    if _check_already_sent_today("SESSION_SUMMARY", date_str):
+        logger.info("session_summary_already_sent_today", date=date_str, skipped=True)
+        return True  # Return True since the job effectively "succeeded" (was already sent)
 
     t_ok = False
     d_ok = False
@@ -134,29 +190,53 @@ def create_alert_scheduler(
     Configure APScheduler with:
     1. Daily Brief: 9:15 AM PKT
     2. Session Summary: 3:45 PM PKT
+    
+    Uses persistent SQLAlchemy job store to survive process restarts.
+    Jobs configured with 5-minute misfire_grace_time to handle brief restart delays.
     """
-    scheduler = BackgroundScheduler(timezone=PKT_TZ)
+    # Configure persistent job store using the same database as the app
+    # Convert async database URL to sync URL for SQLAlchemyJobStore (which requires sync engine)
+    db_url = settings.database_url
+    if "+aiosqlite" in db_url:
+        jobstore_url = db_url.replace("+aiosqlite", "")
+    elif "+asyncpg" in db_url:
+        jobstore_url = db_url.replace("+asyncpg", "")
+    else:
+        jobstore_url = db_url
+    
+    jobstores = {
+        'default': SQLAlchemyJobStore(url=jobstore_url)
+    }
+    
+    scheduler = BackgroundScheduler(
+        timezone=PKT_TZ,
+        jobstores=jobstores
+    )
 
     # 1. Daily Brief at 9:15 AM PKT
+    # misfire_grace_time=300 (5 minutes) allows brief restart delays without skipping
     scheduler.add_job(
         run_daily_brief_job,
         trigger=CronTrigger(hour=9, minute=15, timezone=PKT_TZ),
-        id="telegram_daily_brief",
-        name="Telegram Daily Brief (9:15 AM PKT)",
+        id="daily_brief",
+        name="Daily Brief (9:15 AM PKT)",
         replace_existing=True,
+        misfire_grace_time=300,  # 5 minutes
     )
 
     # 2. Session Summary at 3:45 PM PKT (15:45)
+    # misfire_grace_time=300 (5 minutes) allows brief restart delays without skipping
     scheduler.add_job(
         run_session_summary_job,
         trigger=CronTrigger(hour=15, minute=45, timezone=PKT_TZ),
-        id="telegram_session_summary",
-        name="Telegram Session Summary (3:45 PM PKT)",
+        id="session_summary",
+        name="Session Summary (3:45 PM PKT)",
         replace_existing=True,
+        misfire_grace_time=300,  # 5 minutes
     )
 
     if start:
         scheduler.start()
-        logger.info("alert_scheduler_started")
+        logger.info("alert_scheduler_started", jobstore="sqlalchemy", database_url=jobstore_url)
 
     return scheduler
