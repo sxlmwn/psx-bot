@@ -34,6 +34,8 @@ from veterandesk.strategy.models import TradeSignal, SignalAction, SignalStatus
 
 logger = get_logger("veterandesk.api")
 
+__all__ = ["app", "broker", "ledger", "risk_engine"]
+
 # Initialize core services
 app = FastAPI(
     title="VeteranDesk PSX Trading Engine API",

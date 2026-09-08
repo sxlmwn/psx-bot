@@ -346,4 +346,5 @@ def generate_csv_export(df: pd.DataFrame) -> bytes:
     """
     Renders a pandas DataFrame into UTF-8 CSV bytes in-memory.
     """
-    return df.to_csv(index=False).encode("utf-8")
+    csv_str: str = df.to_csv(index=False)
+    return csv_str.encode("utf-8")
