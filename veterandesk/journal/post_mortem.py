@@ -188,6 +188,14 @@ class PostMortemEngine:
         if not groq_api_key or settings.use_mock_llm_if_no_key:
             return self._generate_deterministic_fallback(record)
 
+        # Get relevant past lessons for this ticker
+        lesson_context = self.lessons_memory.build_post_mortem_lesson_context(record.ticker)
+
+        # Increment times_cited for relevant lessons
+        relevant_lessons = self.lessons_memory.get_lessons_for_ticker(record.ticker)
+        for lesson in relevant_lessons:
+            self.lessons_memory.cite_lesson(lesson)
+
         # Real Groq API Call
         prompt = (
             f"You are the disciplined chief risk officer for a PSX trading desk. Analyze this trade:\n"
@@ -197,6 +205,7 @@ class PostMortemEngine:
             f"Net PnL: PKR {record.net_pnl:+,.2f}\n"
             f"Exit Reason: {record.exit_reason or 'UNKNOWN'}\n"
             f"Conditions: {json.dumps(record.market_conditions)}\n\n"
+            f"{lesson_context}\n\n"
             f"CRITICAL DISCIPLINE RULES FOR VERDICTS:\n"
             f"1. A trade with Net PnL <= 0 must NEVER be called 'Right' and must NEVER be described as having 'positive expectancy'.\n"
             f"2. If price hit target nominally but Net PnL was negative due to commissions and slippage, classify as 'Right-for-wrong-reason' or 'Wrong-for-right-reason', explaining inadequate friction margin.\n"

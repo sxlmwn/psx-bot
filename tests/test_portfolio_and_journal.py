@@ -3,7 +3,9 @@ Tests for Real Portfolio Plans, Graduation Metrics, and Journal Post-Mortems.
 """
 
 from datetime import datetime, time, timezone
+import json
 import pytest
+from unittest.mock import patch, MagicMock
 
 from veterandesk.portfolio.manager import PortfolioManager, PortfolioAction
 from veterandesk.execution.graduation import compute_performance_metrics
@@ -112,7 +114,7 @@ class TestPortfolioAndJournal:
         assert len(m_grad.graduation_blockers) == 0
 
     @pytest.mark.asyncio
-    async def test_post_mortem_and_lesson_injection(self):
+    async def test_post_mortem_and_lesson_injection(self, deterministic_llm):
         lessons_mem = LessonsMemory()
         engine = PostMortemEngine(lessons_memory=lessons_mem)
 
@@ -155,7 +157,75 @@ class TestPortfolioAndJournal:
         assert active_lessons[0].times_cited == 1
 
     @pytest.mark.asyncio
-    async def test_post_mortem_loss_with_target_hit_cannot_be_right_or_positive_expectancy(self):
+    async def test_post_mortem_lesson_injection_and_citation(self):
+        """
+        Verify that past lessons are injected into post-mortem prompts and
+        times_cited is incremented when lessons are used.
+        """
+        from veterandesk.config import settings
+
+        # Temporarily disable the mock LLM fixture for this test
+        with patch.object(settings, 'use_mock_llm_if_no_key', False):
+            lessons_mem = LessonsMemory()
+            engine = PostMortemEngine(lessons_memory=lessons_mem)
+
+            # Create a past lesson for OGDC
+            past_lesson = lessons_mem.add_lesson(
+                category="ORB_OGDC",
+                text="OGDC tends to have narrow ranges; increase target buffer.",
+                trade_id="OLD_TRADE_1"
+            )
+            assert past_lesson.times_cited == 0
+
+            # Create a new trade for OGDC to analyze
+            trade = DemoTrade(
+                trade_id="NEW_TRADE_1",
+                signal_id="SIG_NEW_1",
+                ticker="OGDC",
+                action=SignalAction.BUY,
+                shares=100,
+                entry_price=140.0,
+                stop_loss=135.0,
+                target_price=147.5,
+                slippage_pct=0.002,
+                filled_entry_price=140.28,
+            )
+            trade.filled_exit_price = 145.0
+            trade.exit_reason = ExitReason.STOP_HIT
+            trade.net_pnl = -500.0
+
+            # Mock the LLM call to capture the prompt
+            with patch('veterandesk.journal.post_mortem.Groq') as mock_groq, \
+                 patch('veterandesk.journal.post_mortem.get_secret') as mock_get_secret:
+
+                mock_get_secret.return_value = "fake_api_key"
+
+                mock_completion = MagicMock()
+                mock_completion.choices = [MagicMock()]
+                mock_completion.choices[0].message.content = json.dumps({
+                    "verdict": "Wrong-for-right-reason",
+                    "analysis": "Stop hit cleanly; setup was valid but market reversed.",
+                    "transferable_lesson": "Stop loss discipline protects capital on reversals."
+                })
+                mock_client = MagicMock()
+                mock_client.chat.completions.create.return_value = mock_completion
+                mock_groq.return_value = mock_client
+
+                engine.queue_trade_for_post_mortem(trade)
+                await engine.process_pending_queue()
+
+                # Verify the LLM was called with lesson context
+                assert mock_client.chat.completions.create.called
+                call_args = mock_client.chat.completions.create.call_args
+                prompt = call_args[1]['messages'][1]['content']
+                assert "RELEVANT PAST LESSONS" in prompt
+                assert "OGDC tends to have narrow ranges" in prompt
+
+            # Verify times_cited was incremented for the relevant lesson
+            assert past_lesson.times_cited == 1
+
+    @pytest.mark.asyncio
+    async def test_post_mortem_loss_with_target_hit_cannot_be_right_or_positive_expectancy(self, deterministic_llm):
         """
         Verify that a trade hitting target nominally but suffering a net loss due to
         friction is classified as 'Right-for-wrong-reason' and NEVER claims positive expectancy.

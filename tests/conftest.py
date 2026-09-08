@@ -8,14 +8,16 @@ from unittest.mock import patch, MagicMock
 from veterandesk.config import settings
 
 
-@pytest.fixture(autouse=True)
-def force_deterministic_llm_for_tests():
+@pytest.fixture
+def deterministic_llm():
     """
-    Force deterministic LLM fallback for all post-mortem tests.
+    Force deterministic LLM fallback for post-mortem tests.
     
     This ensures tests are deterministic and don't depend on real LLM API responses,
     which can be non-deterministic and flaky. The deterministic fallback has
     well-defined rules that produce consistent verdicts.
+    
+    Apply this fixture explicitly to tests that need deterministic behavior.
     """
     with patch.object(settings, 'use_mock_llm_if_no_key', True):
         yield

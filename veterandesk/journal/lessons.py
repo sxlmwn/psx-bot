@@ -131,3 +131,18 @@ class LessonsMemory:
         lines.append("=========================================")
         return "\n".join(lines)
 
+    def build_post_mortem_lesson_context(self, ticker: str) -> str:
+        """
+        Build text block of ticker-relevant lessons for post-mortem LLM prompt.
+        Does NOT auto-increment times_cited; caller must cite explicitly.
+        """
+        relevant_lessons = self.get_lessons_for_ticker(ticker)
+        if not relevant_lessons:
+            return "No relevant previous lessons for this ticker."
+
+        lines = ["=== RELEVANT PAST LESSONS ==="]
+        for idx, l in enumerate(relevant_lessons, 1):
+            lines.append(f"{idx}. [{l.category}] {l.lesson_text}")
+        lines.append("==============================")
+        return "\n".join(lines)
+
