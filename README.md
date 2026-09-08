@@ -12,9 +12,9 @@ VeteranDesk is an autonomous trading agent designed to operate with the discipli
 > **VeteranDesk is a verified, working MVP proving the full pipeline end-to-end, ready for the shadow-run period to begin.**
 
 ### 📊 Code Quality & Test Metrics
-- **Test Suite:** **81 passing tests** across unit, golden, boundary, and crash-recovery suites.
-- **Test Coverage:** **85% overall codebase coverage** (`veterandesk/risk/engine.py` and `veterandesk/risk/rules.py` at **100%**).
-- **Type Safety:** **`mypy --strict veterandesk` clean (0 errors across 47 source files)**.
+- **Test Suite:** **128 passing tests** across unit, golden, boundary, and crash-recovery suites.
+- **Test Coverage:** **76% overall codebase coverage** (`veterandesk/risk/rules.py` at **100%**, `veterandesk/risk/engine.py` at **95%**).
+- **Type Safety:** **`mypy --strict veterandesk` clean (0 errors across 54 source files)**.
 - **Database:** Live Supabase PostgreSQL backend with full schema constraints and verified dual REST/Direct drivers.
 
 ---
@@ -40,7 +40,7 @@ VeteranDesk is an autonomous trading agent designed to operate with the discipli
 9. **Criterion #10 — Crash-Recovery Passes 3 Times Consecutively:**
    - `tests/test_crash_recovery.py` executed three consecutive times with a **100% pass rate** on all 3 runs.
 10. **Criterion #11 — Test Suite Green & Mypy Strict Clean:**
-    - 81/81 tests pass, 85% overall coverage, 100% Risk Engine coverage, and 0 `mypy --strict` errors across 47 source files.
+    - 128/128 tests pass, 76% overall coverage, 100% Risk Rules coverage, and 0 `mypy --strict` errors across 54 source files.
 
 ---
 
@@ -119,7 +119,7 @@ cp .env.example .env
 ```bash
 python main.py test
 ```
-*Current test suite:* **116 passed tests**, **`mypy --strict` clean (0 errors across 52 source files)**, **1,000-fill Double-Entry Ledger reconciliation verified**, **Crash-Recovery suite passed 3x consecutively**.
+*Current test suite:* **128 passed tests**, **`mypy --strict` clean (0 errors across 54 source files)**, **1,000-fill Double-Entry Ledger reconciliation verified**, **Crash-Recovery suite passed 3x consecutively**.
 
 ### 3. Launch FastAPI Backend
 ```bash
@@ -158,7 +158,7 @@ python scripts/test_discord_send.py
 | **Crash Recovery Suite** | State persistence across sudden restarts | **Passed (3x in a row)** |
 | **Telegram Bot Delivery** | 8 templates, 3x retry backoff, outbox logging | **100% Pass (19/19)** |
 | **Discord Webhook Delivery** | Rich embeds, HTTP 429 rate limit, decoupled dispatch | **100% Pass (17/17)** |
-| **Coverage & Type Safety** | ≥85% test coverage + strict static types | **116 Tests Pass, 0 Mypy Errors** |
+| **Coverage & Type Safety** | ≥85% test coverage + strict static types | **128 Tests Pass, 0 Mypy Errors** |
 
 ---
 
