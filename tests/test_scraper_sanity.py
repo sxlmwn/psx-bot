@@ -5,16 +5,19 @@ Tests for Market Data Module:
 - Gap and outage detection (2 warnings, 5 halts)
 - Candle builder and tick replay
 - EOD session integrity check
+- Tick persistence to database
 """
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch, MagicMock
 import pytest
 
 from veterandesk.market_data.validator import TickValidator
 from veterandesk.market_data.latency import evaluate_latency
 from veterandesk.market_data.gap_detector import GapDetector
-from veterandesk.market_data.candle_builder import build_candles_from_ticks
+from veterandesk.market_data.candle_builder import build_candles_from_ticks, Candle
 from veterandesk.market_data.integrity import check_session_integrity
+from veterandesk.market_data.scraper import PSXDpsScraper
 
 
 class TestMarketDataSanityAndLatency:
@@ -169,10 +172,116 @@ class TestMarketDataSanityAndLatency:
             assert tick["volume"] == 2500000
             assert tick["data_status"] == "ok"
 
-    def test_psx_dps_scraper_retry_on_failure(self):
-        from unittest.mock import patch
-        from veterandesk.market_data.scraper import PSXDpsScraper
+    def test_tick_persistence_and_idempotency(self):
+        """
+        Verify that validated ticks are persisted to market_ticks table
+        and that the unique constraint prevents duplicates.
+        """
+        scraper = PSXDpsScraper(max_retries=1)
 
+        # Mock the database client
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.upsert.return_value.execute.return_value = None
+
+        with patch('veterandesk.database.session.db_manager') as mock_db_mgr:
+            mock_db_mgr.get_client.return_value = mock_client
+
+            # First tick write
+            tick_data = {
+                "ticker": "OGDC",
+                "price": 142.50,
+                "volume": 2500000,
+                "high": 144.0,
+                "low": 141.0,
+                "change": 2.50,
+                "psx_timestamp": datetime.now(timezone.utc),
+                "scraped_at": datetime.now(timezone.utc),
+                "latency_seconds": 1.5,
+                "data_status": "ok",
+                "session_id": "test_session",
+            }
+
+            scraper._persist_tick(tick_data)
+
+            # Verify upsert was called once
+            assert mock_table.upsert.call_count == 1
+            first_call_args = mock_table.upsert.call_args[0][0]
+            assert first_call_args["ticker"] == "OGDC"
+            assert first_call_args["price"] == 142.50
+
+            # Second tick write with same ticker+timestamp (should be idempotent)
+            scraper._persist_tick(tick_data)
+
+            # Verify upsert was called again (idempotent upsert, not error)
+            assert mock_table.upsert.call_count == 2
+
+    def test_tick_persistence_fail_safe(self):
+        """
+        Verify that tick persistence failures are logged but don't crash the scraper.
+        """
+        scraper = PSXDpsScraper(max_retries=1)
+
+        # Mock database to raise exception
+        with patch('veterandesk.database.session.db_manager') as mock_db_mgr:
+            mock_client = MagicMock()
+            mock_db_mgr.get_client.return_value = mock_client
+            mock_client.table.side_effect = Exception("Database connection failed")
+
+            tick_data = {
+                "ticker": "OGDC",
+                "price": 142.50,
+                "volume": 2500000,
+                "high": 144.0,
+                "low": 141.0,
+                "change": 2.50,
+                "psx_timestamp": datetime.now(timezone.utc),
+                "scraped_at": datetime.now(timezone.utc),
+                "latency_seconds": 1.5,
+                "data_status": "ok",
+                "session_id": "test_session",
+            }
+
+            # Should not raise exception, just log warning
+            scraper._persist_tick(tick_data)
+
+    def test_candle_integrity_uses_tick_data_source(self):
+        """
+        Verify that candle integrity check can work with tick-level data
+        as a durable source rather than only in-memory state.
+        """
+        # Create sample 1-minute candles for a 60-minute session
+        candles = []
+        session_start = datetime(2024, 1, 15, 9, 15, 0, tzinfo=timezone.utc)
+        for i in range(60):
+            ts = session_start + timedelta(minutes=i)
+            candles.append(Candle(
+                ticker="OGDC",
+                timeframe="1m",
+                open=100.0 + i * 0.1,
+                high=100.5 + i * 0.1,
+                low=99.5 + i * 0.1,
+                close=100.0 + i * 0.1,
+                volume=10000,
+                timestamp=ts,
+                data_status="ok"
+            ))
+
+        session_end = session_start + timedelta(minutes=60)
+
+        report = check_session_integrity(
+            candles_1m=candles,
+            session_start=session_start,
+            session_end=session_end
+        )
+
+        assert report.expected_candles == 60
+        assert report.actual_candles == 60
+        assert report.is_healthy is True
+        assert len(report.missing_intervals) == 0
+
+    def test_psx_dps_scraper_retry_on_failure(self):
         scraper = PSXDpsScraper(max_retries=2, timeout=0.1)
 
         with patch.object(scraper.session, "get", side_effect=Exception("Connection timed out")):

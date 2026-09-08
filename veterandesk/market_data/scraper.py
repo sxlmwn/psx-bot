@@ -249,7 +249,7 @@ class PSXDpsScraper:
             if val_res.status == "degraded" or latency_res.status == "degraded":
                 status = "degraded"
 
-            return {
+            tick_data = {
                 "ticker": ticker.upper(),
                 "price": price,
                 "volume": volume,
@@ -263,6 +263,43 @@ class PSXDpsScraper:
                 "session_id": settings.session_id,
             }
 
+            # Persist tick to database (fail-safe: log error but don't crash)
+            self._persist_tick(tick_data)
+
+            return tick_data
+
         except Exception as e:
             logger.error("parse_quote_error", ticker=ticker, error=str(e))
             return None
+
+    def _persist_tick(self, tick_data: Dict[str, Any]) -> None:
+        """
+        Persist validated tick to market_ticks table with idempotent upsert.
+        Fail-safe: logs error but continues operation on DB write failure.
+        """
+        try:
+            from veterandesk.database.session import db_manager
+            client = db_manager.get_client()
+
+            row = {
+                "ticker": tick_data["ticker"],
+                "price": tick_data["price"],
+                "volume": tick_data["volume"],
+                "high": tick_data.get("high"),
+                "low": tick_data.get("low"),
+                "change": tick_data.get("change"),
+                "psx_timestamp": tick_data["psx_timestamp"].isoformat(),
+                "scraped_at": tick_data["scraped_at"].isoformat(),
+                "latency_seconds": tick_data["latency_seconds"],
+                "data_status": tick_data["data_status"],
+                "session_id": tick_data["session_id"],
+            }
+
+            # Use upsert with conflict resolution on unique constraint
+            # The unique constraint (ticker, psx_timestamp) ensures idempotency
+            client.table("market_ticks").upsert(row).execute()
+            logger.debug("tick_persisted", ticker=tick_data["ticker"], psx_timestamp=tick_data["psx_timestamp"])
+
+        except Exception as e:
+            # Fail-safe: log warning but don't crash the scraper
+            logger.warning("tick_persistence_failed", ticker=tick_data.get("ticker"), error=str(e))
