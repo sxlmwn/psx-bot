@@ -101,6 +101,9 @@ class TradingEngine:
             logger.info("new_trading_session_initialized", date=str(today), previous=str(self.current_session_date))
             self.current_session_date = today
             self.tickers_traded_today.clear()
+            # Reset TickValidator cumulative volume history so opening session ticks aren't rejected
+            if hasattr(self.scraper, "validator") and hasattr(self.scraper.validator, "reset"):
+                self.scraper.validator.reset()
             # Reload any open trades from database
             self.broker.load_open_trades_from_db()
             for t in self.broker.open_trades.values():
