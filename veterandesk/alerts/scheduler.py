@@ -233,16 +233,125 @@ def run_daily_brief_job(
     return t_ok or d_ok
 
 
+def fetch_session_summary_metrics(session_date: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Query database for executed trades on the specified PKT session date
+    and compute aggregated session summary metrics.
+    """
+    now_pkt = datetime.now(PKT_TZ)
+    date_str = session_date or now_pkt.strftime("%Y-%m-%d")
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except Exception:
+        target_date = now_pkt.date()
+
+    # Time bounds for this PKT date (00:00:00 to 23:59:59 PKT)
+    pkt_start = datetime.combine(target_date, datetime.min.time(), tzinfo=PKT_TZ)
+    pkt_end = datetime.combine(target_date, datetime.max.time(), tzinfo=PKT_TZ)
+    start_utc_iso = pkt_start.astimezone(timezone.utc).isoformat()
+    end_utc_iso = pkt_end.astimezone(timezone.utc).isoformat()
+
+    trades: List[Dict[str, Any]] = []
+    ending_cash = float(settings.starting_balance_pkr)
+
+    try:
+        from veterandesk.database.session import db_manager
+        client = db_manager.get_client()
+
+        # Query trades for the date range
+        raw_trades: List[Dict[str, Any]] = []
+        try:
+            res = (
+                client.table("trades")
+                .select("*")
+                .gte("opened_at", start_utc_iso)
+                .lte("opened_at", end_utc_iso)
+                .execute()
+            )
+            raw_trades = res.data or []
+        except Exception as q_err:
+            logger.warning("session_summary_range_query_failed_trying_all", error=str(q_err))
+            try:
+                res = client.table("trades").select("*").execute()
+                raw_trades = res.data or []
+            except Exception:
+                raw_trades = []
+
+        for row in raw_trades:
+            # Exclude trades flagged as invalid from aggregate session accuracy/performance metrics
+            if row.get("is_valid_signal") is False or row.get("data_quality_flag") == "INVALID":
+                continue
+            opened_at_raw = row.get("opened_at")
+            if opened_at_raw:
+                try:
+                    dt = datetime.fromisoformat(str(opened_at_raw).replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if dt.astimezone(PKT_TZ).date() == target_date:
+                        trades.append(row)
+                except Exception:
+                    continue
+
+        # Query latest cash balance from demo_ledger
+        try:
+            res_ledger = (
+                client.table("demo_ledger")
+                .select("balance_after")
+                .eq("account_name", "CASH")
+                .order("id", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if res_ledger.data and len(res_ledger.data) > 0:
+                ending_cash = float(res_ledger.data[0].get("balance_after") or settings.starting_balance_pkr)
+        except Exception as le:
+            logger.warning("failed_to_fetch_ledger_cash_balance", error=str(le))
+
+    except Exception as e:
+        logger.warning("failed_to_fetch_session_summary_metrics", date=date_str, error=str(e))
+
+    trades_count = len(trades)
+    winning_trades = sum(1 for t in trades if float(t.get("net_pnl") or 0.0) > 0)
+    losing_trades = sum(1 for t in trades if float(t.get("net_pnl") or 0.0) < 0)
+    gross_pnl = round(sum(float(t.get("gross_pnl") or 0.0) for t in trades), 2)
+    total_fees = round(sum(float(t.get("fees_paid") or 0.0) for t in trades), 2)
+    net_pnl = round(sum(float(t.get("net_pnl") or 0.0) for t in trades), 2)
+
+    logger.info(
+        "session_summary_metrics_resolved",
+        date=date_str,
+        trades_count=trades_count,
+        winning=winning_trades,
+        losing=losing_trades,
+        gross_pnl=gross_pnl,
+        total_fees=total_fees,
+        net_pnl=net_pnl,
+        ending_cash=ending_cash,
+    )
+
+    return {
+        "session_date": date_str,
+        "trades_count": trades_count,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "gross_pnl": gross_pnl,
+        "total_fees": total_fees,
+        "net_pnl": net_pnl,
+        "discipline_violations": 0,
+        "ending_cash": ending_cash,
+    }
+
+
 def run_session_summary_job(
     session_date: Optional[str] = None,
-    trades_count: int = 0,
-    winning_trades: int = 0,
-    losing_trades: int = 0,
-    gross_pnl: float = 0.0,
-    total_fees: float = 0.0,
-    net_pnl: float = 0.0,
+    trades_count: Optional[int] = None,
+    winning_trades: Optional[int] = None,
+    losing_trades: Optional[int] = None,
+    gross_pnl: Optional[float] = None,
+    total_fees: Optional[float] = None,
+    net_pnl: Optional[float] = None,
     discipline_violations: int = 0,
-    ending_cash: float = 500000.0,
+    ending_cash: Optional[float] = None,
 ) -> bool:
     """
     Scheduled 3:45 PM PKT Job: Formats and dispatches post-market session summary.
@@ -256,20 +365,39 @@ def run_session_summary_job(
         logger.info("session_summary_already_sent_today", date=date_str, skipped=True)
         return True  # Return True since the job effectively "succeeded" (was already sent)
 
+    # If metrics not provided (e.g. invoked by APScheduler with no arguments), fetch from DB
+    if trades_count is None:
+        metrics = fetch_session_summary_metrics(session_date=date_str)
+        t_count = int(metrics["trades_count"])
+        w_trades = int(metrics["winning_trades"]) if winning_trades is None else winning_trades
+        l_trades = int(metrics["losing_trades"]) if losing_trades is None else losing_trades
+        g_pnl = float(metrics["gross_pnl"]) if gross_pnl is None else gross_pnl
+        t_fees = float(metrics["total_fees"]) if total_fees is None else total_fees
+        n_pnl = float(metrics["net_pnl"]) if net_pnl is None else net_pnl
+        end_cash = float(metrics["ending_cash"]) if ending_cash is None else ending_cash
+    else:
+        t_count = trades_count
+        w_trades = winning_trades if winning_trades is not None else 0
+        l_trades = losing_trades if losing_trades is not None else 0
+        g_pnl = gross_pnl if gross_pnl is not None else 0.0
+        t_fees = total_fees if total_fees is not None else 0.0
+        n_pnl = net_pnl if net_pnl is not None else 0.0
+        end_cash = ending_cash if ending_cash is not None else 500000.0
+
     t_ok = False
     d_ok = False
 
     try:
         t_ok = telegram_service.send_session_summary(
             session_date=date_str,
-            trades_count=trades_count,
-            winning_trades=winning_trades,
-            losing_trades=losing_trades,
-            gross_pnl=gross_pnl,
-            total_fees=total_fees,
-            net_pnl=net_pnl,
+            trades_count=t_count,
+            winning_trades=w_trades,
+            losing_trades=l_trades,
+            gross_pnl=g_pnl,
+            total_fees=t_fees,
+            net_pnl=n_pnl,
             discipline_violations=discipline_violations,
-            ending_cash=ending_cash,
+            ending_cash=end_cash,
         )
         logger.info("telegram_session_summary_job_dispatched", date=date_str, success=t_ok)
     except Exception as e:
@@ -278,14 +406,14 @@ def run_session_summary_job(
     try:
         d_ok = discord_service.send_session_summary(
             session_date=date_str,
-            trades_count=trades_count,
-            winning_trades=winning_trades,
-            losing_trades=losing_trades,
-            gross_pnl=gross_pnl,
-            total_fees=total_fees,
-            net_pnl=net_pnl,
+            trades_count=t_count,
+            winning_trades=w_trades,
+            losing_trades=l_trades,
+            gross_pnl=g_pnl,
+            total_fees=t_fees,
+            net_pnl=n_pnl,
             discipline_violations=discipline_violations,
-            ending_cash=ending_cash,
+            ending_cash=end_cash,
         )
         logger.info("discord_session_summary_job_dispatched", date=date_str, success=d_ok)
     except Exception as e:
