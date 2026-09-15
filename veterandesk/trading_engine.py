@@ -243,9 +243,26 @@ class TradingEngine:
                 )
                 continue
 
+            # Filter candles to only include today's PKT trading session.
+            # DPS intraday timeseries may return previous trading session candles if the
+            # current day's candles have not yet been formed by PSX.
+            today_candles: List[Dict[str, Any]] = []
+            for c in candles:
+                c_ts = c.get("timestamp")
+                if isinstance(c_ts, str):
+                    try:
+                        c_ts = datetime.fromisoformat(c_ts.replace("Z", "+00:00"))
+                    except Exception:
+                        continue
+                if isinstance(c_ts, datetime):
+                    if c_ts.tzinfo is None:
+                        c_ts = c_ts.replace(tzinfo=timezone.utc)
+                    if c_ts.astimezone(PKT_TZ).date() == today:
+                        today_candles.append(c)
+
             latest_price = float(quote["price"])
             latest_volume = int(quote["volume"])
-            candle_count = len(candles)
+            candle_count = len(today_candles)
 
             logger.info(
                 "scraper_tick_received",
