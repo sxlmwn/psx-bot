@@ -63,6 +63,9 @@ class DemoTrade:
     net_pnl: float = 0.0
     fee_version: str = "PSX_STANDARD_v1"
     session_id: str = "default_session"
+    is_valid_signal: bool = True
+    data_quality_flag: str = "VALID"
+    invalidation_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Non-negotiable: Stop loss cannot be None or invalid
@@ -70,6 +73,34 @@ class DemoTrade:
             raise ValueError(f"CRITICAL: Trade {self.trade_id} rejected - stop loss cannot be empty or <= 0")
         if self.action == SignalAction.BUY and self.stop_loss >= self.entry_price:
             raise ValueError(f"CRITICAL: Stop loss ({self.stop_loss}) must be strictly below entry ({self.entry_price})")
+
+    def to_db_dict(self) -> Dict[str, Any]:
+        """Convert trade record to Supabase DB schema dictionary."""
+        return {
+            "trade_id": self.trade_id,
+            "signal_id": self.signal_id,
+            "ticker": self.ticker,
+            "action": self.action.value if hasattr(self.action, "value") else str(self.action),
+            "shares": int(self.shares),
+            "entry_price": float(self.filled_entry_price),
+            "exit_price": float(self.filled_exit_price) if self.filled_exit_price is not None else None,
+            "stop_loss": float(self.stop_loss),
+            "target_price": float(self.target_price),
+            "slippage_pct": float(self.slippage_pct),
+            "gross_pnl": float(self.gross_pnl) if self.gross_pnl is not None else None,
+            "fees_paid": float(self.entry_fees + self.exit_fees),
+            "net_pnl": float(self.net_pnl) if self.net_pnl is not None else None,
+            "risk_pct_used": 0.50,
+            "status": self.status.value if hasattr(self.status, "value") else str(self.status),
+            "exit_reason": self.exit_reason.value if self.exit_reason and hasattr(self.exit_reason, "value") else (str(self.exit_reason) if self.exit_reason else None),
+            "opened_at": self.opened_at.isoformat() if hasattr(self.opened_at, "isoformat") else str(self.opened_at),
+            "closed_at": self.closed_at.isoformat() if self.closed_at and hasattr(self.closed_at, "isoformat") else (str(self.closed_at) if self.closed_at else None),
+            "fee_version": self.fee_version,
+            "session_id": self.session_id,
+            "is_valid_signal": self.is_valid_signal,
+            "data_quality_flag": self.data_quality_flag,
+            "invalidation_reason": self.invalidation_reason,
+        }
 
 
 class PaperBroker:
@@ -125,6 +156,9 @@ class PaperBroker:
                     entry_fees=float(row.get("fees_paid", 0.0)),
                     fee_version=row.get("fee_version", "PSX_STANDARD_v1"),
                     session_id=row.get("session_id", "default_session"),
+                    is_valid_signal=bool(row.get("is_valid_signal", True)),
+                    data_quality_flag=str(row.get("data_quality_flag", "VALID")),
+                    invalidation_reason=row.get("invalidation_reason"),
                 )
                 self.open_trades[trade_id] = trade
                 loaded += 1
@@ -436,28 +470,7 @@ class PaperBroker:
         try:
             from veterandesk.database.session import db_manager
             client = db_manager.get_client()
-            record = {
-                "trade_id": trade.trade_id,
-                "signal_id": trade.signal_id,
-                "ticker": trade.ticker,
-                "action": trade.action.value,
-                "shares": int(trade.shares),
-                "entry_price": float(trade.filled_entry_price),
-                "exit_price": float(trade.filled_exit_price) if trade.filled_exit_price is not None else None,
-                "stop_loss": float(trade.stop_loss),
-                "target_price": float(trade.target_price),
-                "slippage_pct": float(trade.slippage_pct),
-                "gross_pnl": float(trade.gross_pnl) if trade.gross_pnl is not None else None,
-                "fees_paid": float(trade.entry_fees + trade.exit_fees),
-                "net_pnl": float(trade.net_pnl) if trade.net_pnl is not None else None,
-                "risk_pct_used": 0.50,
-                "status": trade.status.value,
-                "exit_reason": trade.exit_reason.value if trade.exit_reason else None,
-                "opened_at": trade.opened_at.isoformat(),
-                "closed_at": trade.closed_at.isoformat() if trade.closed_at else None,
-                "fee_version": trade.fee_version,
-                "session_id": trade.session_id,
-            }
+            record = trade.to_db_dict()
             # Ensure trade_signals row exists and has the approved position size
             try:
                 sig_check = client.table("trade_signals").select("signal_id").eq("signal_id", trade.signal_id).execute()

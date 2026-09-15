@@ -85,6 +85,17 @@ try:
 except Exception as err:
     st.warning(f"Could not load closed trades for graduation tracking: {err}")
 
+# Filter for official shadow run: exclude invalid trades and trades before shadow_run_official_start_date
+official_start_str = settings.shadow_run_official_start_date
+valid_official_trades: List[Dict[str, Any]] = []
+for t in closed_trades:
+    if t.get("is_valid_signal") is False or t.get("data_quality_flag") == "INVALID":
+        continue
+    opened_at_str = str(t.get("opened_at") or "")[:10]
+    if opened_at_str and opened_at_str < official_start_str:
+        continue
+    valid_official_trades.append(t)
+
 # Fetch mistakes
 violations_count = 0
 try:
@@ -93,13 +104,15 @@ try:
 except Exception:
     pass
 
-trades_count = len(closed_trades)
-winning_trades = len([t for t in closed_trades if float(t.get("net_pnl", 0) or 0) > 0])
-total_pnl = sum([float(t.get("net_pnl", 0) or 0) for t in closed_trades], 0.0)
-expectancy = total_pnl / max(1, trades_count)
+trades_count = len(valid_official_trades)
+winning_trades = len([t for t in valid_official_trades if float(t.get("net_pnl", 0) or 0) > 0])
+total_pnl = sum([float(t.get("net_pnl", 0) or 0) for t in valid_official_trades], 0.0)
+expectancy = total_pnl / max(1, trades_count) if trades_count > 0 else 0.0
+
+st.info(f"🎯 **Official Shadow Run Tracking:** Counting trades from **{official_start_str}** onwards. Pre-fix / flagged trades are excluded from accuracy metrics.")
 
 g_col1, g_col2, g_col3, g_col4 = st.columns(4)
-g_col1.metric("Closed Trades", f"{trades_count} / {settings.graduation_min_trades}", help="Requires >= 30 closed trades")
+g_col1.metric("Official Closed Trades", f"{trades_count} / {settings.graduation_min_trades}", help="Requires >= 30 closed trades")
 g_col2.metric("Expectancy", f"PKR {expectancy:,.2f}", help="Must be strictly positive")
 g_col3.metric("Max Drawdown", "0.00%", help="Must stay below 10.00%")
 g_col4.metric("Audit Violations", f"{violations_count}", help="Zero violations allowed in last 20 trades")

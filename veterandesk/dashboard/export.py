@@ -40,6 +40,8 @@ TRADE_EXPORT_COLUMNS = [
     "Post-Mortem Analysis",
     "Transferable Lesson",
     "Mistake Flags",
+    "Data Quality",
+    "Invalidation Reason",
     "Status",
 ]
 
@@ -93,6 +95,7 @@ def build_trade_log_dataframe(
     end_date: Optional[date] = None,
     ticker_filter: Optional[str] = None,
     verdict_filter: Optional[str] = None,
+    data_quality_filter: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Joins trades with journal verdicts/post-mortems and mistake audit flags into a flat DataFrame.
@@ -159,6 +162,19 @@ def build_trade_log_dataframe(
         if verdict_filter and verdict_filter != "All" and verdict != verdict_filter:
             continue
 
+        # Data Quality Filtering
+        data_quality = str(t.get("data_quality_flag") or "VALID").upper()
+        if data_quality_filter and data_quality_filter not in ("All", "ALL"):
+            filter_norm = data_quality_filter.upper()
+            if "INVALID" in filter_norm:
+                target_flag = "INVALID"
+            elif "VALID" in filter_norm:
+                target_flag = "VALID"
+            else:
+                target_flag = filter_norm
+            if data_quality != target_flag:
+                continue
+
         entry_price = float(t.get("entry_price") or 0.0)
         shares = int(t.get("shares") or 0)
         cost_basis = entry_price * shares
@@ -194,6 +210,8 @@ def build_trade_log_dataframe(
             "Post-Mortem Analysis": j.get("post_mortem_analysis") or "",
             "Transferable Lesson": j.get("transferable_lesson") or "",
             "Mistake Flags": mistake_flags,
+            "Data Quality": data_quality,
+            "Invalidation Reason": t.get("invalidation_reason") or "None",
             "Status": status,
         })
 

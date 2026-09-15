@@ -12,8 +12,9 @@ Status cannot be manually edited or overridden.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
-from veterandesk.config import settings
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Sequence, Union
+from veterandesk.config import PKT_TZ, settings
 from veterandesk.execution.paper_broker import DemoTrade
 from veterandesk.logging import get_logger
 
@@ -37,15 +38,63 @@ class PerformanceMetrics:
     graduation_blockers: List[str]
 
 
+def _get_trade_field(t: Any, key: str, default: Any = None) -> Any:
+    if isinstance(t, dict):
+        return t.get(key, default)
+    return getattr(t, key, default)
+
+
+def _get_trade_net_pnl(t: Any) -> float:
+    val = _get_trade_field(t, "net_pnl", 0.0)
+    return float(val if val is not None else 0.0)
+
+
+def _get_trade_date(t: Any) -> Optional[date]:
+    val = _get_trade_field(t, "opened_at", None)
+    if val is None:
+        return None
+    if isinstance(val, date) and not isinstance(val, datetime):
+        return val
+    if isinstance(val, datetime):
+        if val.tzinfo is not None:
+            return val.astimezone(PKT_TZ).date()
+        return val.date()
+    if isinstance(val, str):
+        try:
+            dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                return dt.astimezone(PKT_TZ).date()
+            return dt.date()
+        except Exception:
+            return None
+    return None
+
+
 def compute_performance_metrics(
-    closed_trades: List[DemoTrade],
+    closed_trades: Sequence[Union[DemoTrade, Dict[str, Any]]],
     starting_balance: float = 500000.0,
-    recent_violations_count: int = 0
+    recent_violations_count: int = 0,
+    official_start_date: Optional[date] = None,
 ) -> PerformanceMetrics:
     """
     Compute official demo performance metrics and determine graduation status.
+    Excludes invalid trades and trades prior to official_start_date.
     """
-    total = len(closed_trades)
+    valid_trades: List[Union[DemoTrade, Dict[str, Any]]] = []
+    for t in closed_trades:
+        is_valid = _get_trade_field(t, "is_valid_signal", True)
+        if not is_valid:
+            continue
+        quality = _get_trade_field(t, "data_quality_flag", "VALID")
+        if quality != "VALID":
+            continue
+        if official_start_date is not None:
+            t_date = _get_trade_date(t)
+            if t_date is not None and t_date < official_start_date:
+                continue
+        valid_trades.append(t)
+
+    total = len(valid_trades)
     if total == 0:
         return PerformanceMetrics(
             total_trades=0,
@@ -63,15 +112,15 @@ def compute_performance_metrics(
             graduation_blockers=["Zero closed trades (requires >= 30)"]
         )
 
-    wins = [t for t in closed_trades if t.net_pnl > 0]
-    losses = [t for t in closed_trades if t.net_pnl <= 0]
+    wins = [t for t in valid_trades if _get_trade_net_pnl(t) > 0]
+    losses = [t for t in valid_trades if _get_trade_net_pnl(t) <= 0]
 
     num_wins = len(wins)
     num_losses = len(losses)
     win_rate = (num_wins / total) * 100.0
 
-    total_win_amount = sum(t.net_pnl for t in wins)
-    total_loss_amount = abs(sum(t.net_pnl for t in losses))
+    total_win_amount = sum(_get_trade_net_pnl(t) for t in wins)
+    total_loss_amount = abs(sum(_get_trade_net_pnl(t) for t in losses))
 
     avg_win = (total_win_amount / num_wins) if num_wins > 0 else 0.0
     avg_loss = (total_loss_amount / num_losses) if num_losses > 0 else 0.0
@@ -87,15 +136,15 @@ def compute_performance_metrics(
     peak_equity = starting_balance
     max_dd_pct = 0.0
 
-    for t in closed_trades:
-        running_equity += t.net_pnl
+    for t in valid_trades:
+        running_equity += _get_trade_net_pnl(t)
         if running_equity > peak_equity:
             peak_equity = running_equity
         dd = (peak_equity - running_equity) / peak_equity * 100.0
         if dd > max_dd_pct:
             max_dd_pct = dd
 
-    total_net_pnl = sum(t.net_pnl for t in closed_trades)
+    total_net_pnl = sum(_get_trade_net_pnl(t) for t in valid_trades)
 
     # Check graduation criteria
     blockers: List[str] = []

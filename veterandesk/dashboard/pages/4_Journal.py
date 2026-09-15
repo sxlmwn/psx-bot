@@ -80,7 +80,7 @@ with st.container():
         # Available unique tickers
         tickers_list = sorted(list(set(str(t.get("ticker", "")).strip().upper() for t in raw_trades if t.get("ticker"))))
 
-        f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+        f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
         from_date = f_col1.date_input("From Date", value=min_date)
         to_date = f_col2.date_input("To Date", value=max_date)
         selected_ticker = f_col3.selectbox("Filter by Ticker", options=["All"] + tickers_list)
@@ -88,6 +88,12 @@ with st.container():
             "Filter by Verdict",
             options=["All", "Right", "Wrong", "Right-for-wrong-reason", "Wrong-for-right-reason", "Pending", "Open"],
         )
+        selected_quality = f_col5.selectbox(
+            "Data Quality",
+            options=["All", "Valid Only", "Invalid Only"],
+        )
+
+        quality_param = "VALID" if selected_quality == "Valid Only" else ("INVALID" if selected_quality == "Invalid Only" else None)
 
         if from_date > to_date:
             st.warning("⚠️ 'From Date' cannot be later than 'To Date'.")
@@ -101,6 +107,7 @@ with st.container():
                 end_date=to_date,
                 ticker_filter=selected_ticker,
                 verdict_filter=selected_verdict,
+                data_quality_filter=quality_param,
             )
 
         if export_df.empty:

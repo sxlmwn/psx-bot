@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS rules_config (
     entry_cutoff_time_pkt TIME NOT NULL DEFAULT '15:00:00',
     force_close_time_pkt TIME NOT NULL DEFAULT '15:20:00',
     max_adv_pct NUMERIC(5, 2) NOT NULL DEFAULT 5.00,
+    shadow_run_official_start_date DATE DEFAULT '2026-09-15',
     created_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
 );
 
@@ -110,7 +111,10 @@ CREATE TABLE IF NOT EXISTS demo_trades (
     opened_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
     closed_at TIMESTAMPTZ,
     fee_version VARCHAR(32) NOT NULL DEFAULT 'PSX_STANDARD_v1',
-    session_id VARCHAR(64) NOT NULL
+    session_id VARCHAR(64) NOT NULL,
+    is_valid_signal BOOLEAN NOT NULL DEFAULT TRUE,
+    data_quality_flag VARCHAR(32) NOT NULL DEFAULT 'VALID',
+    invalidation_reason TEXT
 );
 
 -- 7. Double-Entry Ledger Table
@@ -228,10 +232,23 @@ CREATE TABLE IF NOT EXISTS trades (
     opened_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
     closed_at TIMESTAMPTZ,
     fee_version VARCHAR(32) NOT NULL DEFAULT 'PSX_STANDARD_v1',
-    session_id VARCHAR(64) NOT NULL
+    session_id VARCHAR(64) NOT NULL,
+    is_valid_signal BOOLEAN NOT NULL DEFAULT TRUE,
+    data_quality_flag VARCHAR(32) NOT NULL DEFAULT 'VALID',
+    invalidation_reason TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_ticker_time ON trades(ticker, opened_at DESC);
+
+-- 14. Shadow Run Metadata Table
+CREATE TABLE IF NOT EXISTS shadow_run_meta (
+    id SERIAL PRIMARY KEY,
+    key VARCHAR(64) NOT NULL UNIQUE,
+    value TEXT NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
+);
 
 -- 14. Remote SQL Execution Helper (callable via service_role key RPC)
 CREATE OR REPLACE FUNCTION exec_sql(query text)

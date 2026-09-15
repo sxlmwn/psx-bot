@@ -155,7 +155,8 @@ class Settings(BaseSettings):
     orb_volume_multiplier: float = 1.50
     orb_target_range_multiplier: float = 1.50  # 1.5x - 2.0x range height
 
-    # Graduation Criteria
+    # Graduation Criteria & Official Shadow Run
+    shadow_run_official_start_date: str = Field(default="2026-09-15", alias="SHADOW_RUN_OFFICIAL_START_DATE")
     graduation_min_trades: int = 30
     graduation_max_drawdown_pct: float = 10.00
     graduation_clean_recent_trades: int = 20
