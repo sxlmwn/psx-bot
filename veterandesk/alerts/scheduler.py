@@ -61,10 +61,111 @@ def _check_already_sent_today(message_type: str, date_str: str) -> bool:
         return False
 
 
+def fetch_watchlist_snapshot(
+    symbols: Optional[List[str]] = None,
+    scraper: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch the latest price and % change for watchlist symbols.
+    
+    Data Source Hierarchy:
+    1. Live PSX DPS quote via PSXDpsScraper (same mechanism used by ORB engine).
+    2. Fallback to database `market_ticks` table for the most recent persisted tick.
+    3. Diagnostic logging if data is completely unavailable for any symbol.
+    """
+    target_symbols = symbols if symbols is not None else settings.watchlist[:8]
+    if not target_symbols:
+        return []
+
+    snapshot: List[Dict[str, Any]] = []
+
+    if scraper is not None:
+        active_scraper = scraper
+    else:
+        try:
+            from veterandesk.market_data.scraper import PSXDpsScraper
+            active_scraper = PSXDpsScraper()
+        except Exception as e:
+            logger.warning("failed_to_initialize_dps_scraper", error=str(e))
+            active_scraper = None
+
+    for sym in target_symbols:
+        sym_clean = sym.strip().upper()
+        price = 0.0
+        change_pct = 0.0
+        source = "none"
+
+        # 1. Primary: Live PSX DPS Scraper (same as TradingEngine/ORB)
+        if active_scraper is not None:
+            try:
+                quote = active_scraper.fetch_ticker_quote(sym_clean)
+                if quote and float(quote.get("price") or 0.0) > 0:
+                    price = float(quote["price"])
+                    raw_change = float(quote.get("change") or 0.0)
+                    if quote.get("change_pct") is not None:
+                        change_pct = float(quote["change_pct"])
+                    elif raw_change != 0.0 and (price - raw_change) > 0:
+                        change_pct = round((raw_change / (price - raw_change)) * 100.0, 2)
+                    else:
+                        change_pct = 0.0
+                    source = "scraper"
+            except Exception as scrap_err:
+                logger.warning("daily_brief_scraper_fetch_failed", ticker=sym_clean, error=str(scrap_err))
+
+        # 2. Secondary: Fallback to database `market_ticks` table
+        if price <= 0.0:
+            try:
+                from veterandesk.database.session import db_manager
+                client = db_manager.get_client()
+                res = (
+                    client.table("market_ticks")
+                    .select("price, change, change_pct")
+                    .eq("ticker", sym_clean)
+                    .order("psx_timestamp", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if res.data and len(res.data) > 0:
+                    row: Dict[str, Any] = res.data[0]
+                    db_price = float(row.get("price") or 0.0)
+                    if db_price > 0:
+                        price = db_price
+                        db_change = float(row.get("change") or 0.0)
+                        if row.get("change_pct") is not None:
+                            change_pct = float(row["change_pct"])
+                        elif db_change != 0.0 and (db_price - db_change) > 0:
+                            change_pct = round((db_change / (db_price - db_change)) * 100.0, 2)
+                        else:
+                            change_pct = 0.0
+                        source = "database_market_ticks"
+            except Exception as db_err:
+                logger.warning("daily_brief_db_fetch_failed", ticker=sym_clean, error=str(db_err))
+
+        if price <= 0.0:
+            logger.warning("daily_brief_ticker_price_unavailable", ticker=sym_clean)
+
+        logger.info(
+            "daily_brief_ticker_resolved",
+            ticker=sym_clean,
+            price=price,
+            change_pct=change_pct,
+            source=source,
+        )
+
+        snapshot.append({
+            "ticker": sym_clean,
+            "price": price,
+            "change_pct": change_pct,
+        })
+
+    return snapshot
+
+
 def run_daily_brief_job(
     date_str: Optional[str] = None,
     watchlist_data: Optional[List[Dict[str, Any]]] = None,
     market_overview: Optional[str] = None,
+    scraper: Optional[Any] = None,
 ) -> bool:
     """
     Scheduled 9:15 AM PKT Job: Formats and dispatches pre-market briefing.
@@ -78,12 +179,22 @@ def run_daily_brief_job(
         logger.info("daily_brief_already_sent_today", date=today_str, skipped=True)
         return True  # Return True since the job effectively "succeeded" (was already sent)
 
-    # Build default watchlist snapshot if none provided
-    if not watchlist_data:
-        watchlist_data = [
-            {"ticker": sym, "price": 0.0, "change_pct": 0.0}
-            for sym in settings.watchlist[:8]
-        ]
+    # Resolve watchlist snapshot with real price data
+    if watchlist_data is None:
+        watchlist_data = fetch_watchlist_snapshot(
+            symbols=settings.watchlist[:8],
+            scraper=scraper,
+        )
+    else:
+        # If caller provided custom watchlist data with missing/zero prices, enrich them
+        for item in watchlist_data:
+            if float(item.get("price") or 0.0) <= 0.0:
+                ticker = item.get("ticker")
+                if ticker:
+                    enriched = fetch_watchlist_snapshot(symbols=[ticker], scraper=scraper)
+                    if enriched and enriched[0]["price"] > 0:
+                        item["price"] = enriched[0]["price"]
+                        item["change_pct"] = enriched[0]["change_pct"]
 
     overview = market_overview or (
         "PSX KSE-100 opening session. ORB breakout strategy active across liquid symbols. "

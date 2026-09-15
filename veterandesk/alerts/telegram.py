@@ -293,8 +293,14 @@ class TelegramService:
         wl_lines = []
         for item in watchlist_summary:
             ticker = item.get("ticker", "N/A")
-            last_price = item.get("price", 0.0)
-            change_pct = item.get("change_pct", 0.0)
+            try:
+                last_price = float(item.get("price", 0.0) or 0.0)
+            except (ValueError, TypeError):
+                last_price = 0.0
+            try:
+                change_pct = float(item.get("change_pct", 0.0) or 0.0)
+            except (ValueError, TypeError):
+                change_pct = 0.0
             sign = "+" if change_pct >= 0 else ""
             wl_lines.append(f"  • `{ticker:<6}`: PKR {last_price:>7.2f} ({sign}{change_pct:.2f}%)")
         wl_text = "\n".join(wl_lines) if wl_lines else "  • Focus symbols under observation."
