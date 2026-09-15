@@ -101,13 +101,13 @@ class TradingEngine:
             logger.info("new_trading_session_initialized", date=str(today), previous=str(self.current_session_date))
             self.current_session_date = today
             self.tickers_traded_today.clear()
-            # Reset TickValidator cumulative volume history so opening session ticks aren't rejected
-            if hasattr(self.scraper, "validator") and hasattr(self.scraper.validator, "reset"):
-                self.scraper.validator.reset()
             # Reload any open trades from database
             self.broker.load_open_trades_from_db()
             for t in self.broker.open_trades.values():
                 self.tickers_traded_today.add(t.ticker)
+            # Reset tick validator state so yesterday's cumulative volume does not reject today's ticks
+            if hasattr(self.scraper, "validator") and hasattr(self.scraper.validator, "reset"):
+                self.scraper.validator.reset()
 
     def _is_already_halted_today(self) -> bool:
         """Check if trading is already halted for the current PKT date."""
@@ -127,19 +127,51 @@ class TradingEngine:
         if not open_list:
             return closed_this_cycle
 
+        today = now_pkt.date()
+
         for trade in open_list:
             ticker = trade.ticker
+
+            # Check if trade was held overnight from a previous session
+            trade_opened_at = trade.opened_at
+            if trade_opened_at.tzinfo is None:
+                trade_opened_at = trade_opened_at.replace(tzinfo=timezone.utc)
+            opened_date = trade_opened_at.astimezone(PKT_TZ).date()
+            is_stale_overnight = opened_date < today
+            is_past_force_close = is_stale_overnight or (now_pkt.time() >= self.risk_engine.force_close_pkt)
+
             quote = self.scraper.fetch_ticker_quote(ticker)
             if not quote:
                 logger.warning("position_monitor_fetch_failed", ticker=ticker, trade_id=trade.trade_id)
+                if is_past_force_close:
+                    logger.warning(
+                        "force_closing_position_without_quote",
+                        trade_id=trade.trade_id,
+                        ticker=ticker,
+                        reason=ExitReason.TIME_STOP_1520.value,
+                        fallback_price=trade.filled_entry_price,
+                    )
+                    try:
+                        closed_trade = self.broker.execute_exit(
+                            trade_id=trade.trade_id,
+                            scraped_price=trade.filled_entry_price,
+                            exit_reason=ExitReason.TIME_STOP_1520,
+                        )
+                        closed_this_cycle.append(closed_trade)
+                    except Exception as ex:
+                        logger.error("position_force_exit_execution_error", trade_id=trade.trade_id, error=str(ex))
                 continue
 
             current_price = float(quote["price"])
-            exit_reason = PaperBroker.evaluate_exit_condition(
-                trade=trade,
-                scraped_price=current_price,
-                current_time_pkt=now_pkt.time(),
-            )
+            exit_reason: Optional[ExitReason]
+            if is_stale_overnight:
+                exit_reason = ExitReason.TIME_STOP_1520
+            else:
+                exit_reason = PaperBroker.evaluate_exit_condition(
+                    trade=trade,
+                    scraped_price=current_price,
+                    current_time_pkt=now_pkt.time(),
+                )
 
             if exit_reason is not None:
                 logger.info(
@@ -174,7 +206,7 @@ class TradingEngine:
 
         return closed_this_cycle
 
-    def run_trading_cycle(self, force_scan: bool = False) -> Dict[str, Any]:
+    def run_trading_cycle(self, force_scan: bool = False, now_pkt: Optional[datetime] = None) -> Dict[str, Any]:
         """
         Execute a single complete trading cycle:
         1. Check market hours (or force_scan)
@@ -187,11 +219,11 @@ class TradingEngine:
         """
         self.cycle_count += 1
         start_time = time.perf_counter()
-        now_pkt = datetime.now(PKT_TZ)
-        today = now_pkt.date()
+        current_pkt = now_pkt or datetime.now(PKT_TZ)
+        today = current_pkt.date()
         self._reset_session_if_new_day(today)
 
-        is_open, market_status_msg = is_psx_market_open(now_pkt)
+        is_open, market_status_msg = is_psx_market_open(current_pkt)
         should_scan = is_open or force_scan or os.environ.get("FORCE_MARKET_SCAN", "").strip().lower() in ("1", "true", "yes")
 
         logger.info(
@@ -201,11 +233,11 @@ class TradingEngine:
             market_status=market_status_msg,
             cash_balance=round(self.ledger.cash_balance, 2),
             open_positions=len(self.broker.open_trades),
-            timestamp=now_pkt.strftime("%Y-%m-%d %H:%M:%S PKT"),
+            timestamp=current_pkt.strftime("%Y-%m-%d %H:%M:%S PKT"),
         )
 
         # Step 1: Manage Exits on Open Positions
-        closed_trades = self.check_open_positions_for_exits(now_pkt)
+        closed_trades = self.check_open_positions_for_exits(current_pkt)
 
         # Step 2: If Market is Closed and Not Forcing Scan, Idle Gracefully
         if not should_scan:
@@ -273,6 +305,7 @@ class TradingEngine:
                 price=latest_price,
                 volume=latest_volume,
                 candles_count=candle_count,
+                raw_candles_count=len(candles),
                 data_status=quote.get("data_status", "ok"),
             )
 
@@ -286,11 +319,11 @@ class TradingEngine:
                 continue
 
             # Check if past entry cutoff (15:00 PKT)
-            if now_pkt.time() >= settings.entry_cutoff_pkt:
+            if current_pkt.time() >= settings.entry_cutoff_pkt:
                 logger.info(
                     "orb_check_skipped_past_cutoff",
                     ticker=ticker,
-                    current_time=now_pkt.strftime("%H:%M:%S"),
+                    current_time=current_pkt.strftime("%H:%M:%S"),
                     cutoff="15:00:00 PKT",
                 )
                 continue
@@ -306,11 +339,11 @@ class TradingEngine:
                 )
                 continue
 
-            # Compute ORB Strategy
+            # Compute ORB Strategy using today's candles
             signals_evaluated += 1
             signal = compute_orb_signal(
                 ticker=ticker,
-                candles_1m=candles,
+                candles_1m=today_candles,
                 range_minutes=settings.orb_range_minutes,
                 volume_multiplier=settings.orb_volume_multiplier,
                 target_multiplier=settings.orb_target_range_multiplier,
@@ -318,12 +351,12 @@ class TradingEngine:
             )
 
             # Compute stats for clear logging
-            range_candles = candles[: settings.orb_range_minutes]
+            range_candles = today_candles[: settings.orb_range_minutes]
             range_high = max(float(c["high"]) for c in range_candles)
             range_low = min(float(c["low"]) for c in range_candles)
             avg_range_vol = sum(float(c["volume"]) for c in range_candles) / len(range_candles)
-            latest_close = float(candles[-1]["close"])
-            latest_candle_vol = float(candles[-1]["volume"])
+            latest_close = float(today_candles[-1]["close"])
+            latest_candle_vol = float(today_candles[-1]["volume"])
             vol_required = avg_range_vol * settings.orb_volume_multiplier
 
             if signal is None:
@@ -337,6 +370,20 @@ class TradingEngine:
                     avg_range_vol=int(avg_range_vol),
                     vol_required=int(vol_required),
                     status="NO_BREAKOUT",
+                )
+                continue
+
+            # Defense-in-depth: Reject any signal with stale timestamp not matching today's session
+            signal_ts = signal.created_at
+            if signal_ts.tzinfo is None:
+                signal_ts = signal_ts.replace(tzinfo=timezone.utc)
+            if signal_ts.astimezone(PKT_TZ).date() != today:
+                logger.warning(
+                    "orb_signal_stale_rejected",
+                    ticker=ticker,
+                    signal_id=signal.signal_id,
+                    signal_date=str(signal_ts.astimezone(PKT_TZ).date()),
+                    session_date=str(today),
                 )
                 continue
 
@@ -365,7 +412,7 @@ class TradingEngine:
                 account_balance=self.ledger.cash_balance,
                 current_day_realized_loss=realized_loss,
                 trades_executed_today=trades_today,
-                current_time_pkt=now_pkt.time(),
+                current_time_pkt=current_pkt.time(),
                 twenty_day_adv=5000000.0,
                 open_positions=open_pos,
                 is_already_halted=is_already_halted,
