@@ -80,6 +80,14 @@ class DoubleEntryLedger:
     def realized_pnl(self) -> float:
         return self._account_balances[AccountType.REALIZED_PNL]
 
+    @property
+    def total_equity(self) -> float:
+        """
+        Total portfolio equity: Cash + Equity Holdings (at cost basis).
+        Reconciled against: Starting Balance + Realized P&L - (Commissions + Taxes).
+        """
+        return self.cash_balance + self.equity_holdings_value
+
     def record_transaction(
         self,
         transaction_id: str,

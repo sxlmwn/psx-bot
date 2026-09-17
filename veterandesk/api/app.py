@@ -129,6 +129,7 @@ def get_performance_metrics() -> Dict[str, Any]:
     return {
         "cash_balance": ledger.cash_balance,
         "equity_holdings": ledger.equity_holdings_value,
+        "total_equity": ledger.total_equity,
         "total_realized_pnl": ledger.realized_pnl,
         "metrics": metrics.__dict__,
     }
@@ -210,9 +211,10 @@ def create_test_trade(req: Optional[TestTradeRequest] = None) -> Dict[str, Any]:
 
     from veterandesk.config import PKT_TZ
     now_pkt = datetime.now(PKT_TZ).time()
+    account_equity = ledger.total_equity if ledger.total_equity > 0 else ledger.starting_balance
     assessment = risk_engine.evaluate_signal(
         signal=sig,
-        account_balance=ledger.cash_balance,
+        account_balance=account_equity,
         current_day_realized_loss=abs(min(0.0, ledger.realized_pnl)),
         trades_executed_today=len(broker.closed_trades) + len(broker.open_trades),
         current_time_pkt=now_pkt,
@@ -333,9 +335,10 @@ def execute_trade_pipeline(req: ExecuteTradeRequest) -> Dict[str, Any]:
 
     from veterandesk.config import PKT_TZ
     now_pkt = datetime.now(PKT_TZ).time()
+    account_equity = ledger.total_equity if ledger.total_equity > 0 else ledger.starting_balance
     assessment = risk_engine.evaluate_signal(
         signal=sig,
-        account_balance=ledger.cash_balance,
+        account_balance=account_equity,
         current_day_realized_loss=abs(min(0.0, ledger.realized_pnl)),
         trades_executed_today=len(broker.closed_trades) + len(broker.open_trades),
         current_time_pkt=now_pkt,

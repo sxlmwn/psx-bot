@@ -407,9 +407,11 @@ class TradingEngine:
             trades_today = len(self.broker.closed_trades) + len(self.broker.open_trades)
             is_already_halted = self._is_already_halted_today()
 
+            account_equity = self.ledger.total_equity if self.ledger.total_equity > 0 else self.ledger.starting_balance
+
             assessment = self.risk_engine.evaluate_signal(
                 signal=signal,
-                account_balance=self.ledger.cash_balance,
+                account_balance=account_equity,
                 current_day_realized_loss=realized_loss,
                 trades_executed_today=trades_today,
                 current_time_pkt=current_pkt.time(),
