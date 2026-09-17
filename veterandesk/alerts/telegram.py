@@ -188,7 +188,7 @@ class TelegramService:
             f"🚨 *CRITICAL DISCIPLINE HALT TRIGGERED*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"• *Daily Loss Reached:* `{loss_pct:.2f}%` (Limit: `{max_loss_pct:.2f}%`)\n"
-            f"• *Total Realized Loss:* `PKR {loss_amount_pkr:>+10,.2f}`\n"
+            f"• *Total Realized Loss:* `PKR {-abs(loss_amount_pkr):>10,.2f}`\n"
             f"• *Trigger Time:* `{halt_time_pkt}`\n"
             f"• *Enforcement Action:* `{action_taken.strip()}`\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"

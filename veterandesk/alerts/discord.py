@@ -203,7 +203,7 @@ class DiscordService:
 
         fields = [
             {"name": "Daily Loss Reached", "value": f"**{loss_pct:.2f}%** (Limit: {max_loss_pct:.2f}%)", "inline": True},
-            {"name": "Total Realized Loss", "value": f"PKR {loss_amount_pkr:>+10,.2f}", "inline": True},
+            {"name": "Total Realized Loss", "value": f"PKR {-abs(loss_amount_pkr):>10,.2f}", "inline": True},
             {"name": "Trigger Time", "value": halt_time_pkt, "inline": True},
             {"name": "Enforcement Action", "value": action_taken.strip(), "inline": False},
             {"name": "Discipline Invariant", "value": "🔒 All trading is blocked until next market session.", "inline": False},
