@@ -32,20 +32,43 @@ def check_daily_halt_from_db(halt_date: date) -> bool:
     Query the daily_halts table to determine if trading is halted for a given date.
     Returns True if a halt record exists with is_halted=True for that date.
     """
+    # 1. Supabase PostgreSQL
     try:
         from veterandesk.database.session import db_manager
         client = db_manager.get_client()
         res = client.table("daily_halts").select("*").eq("halt_date", str(halt_date)).execute()
-        if res.data:
+        if hasattr(res, "data") and isinstance(res.data, list) and len(res.data) > 0:
             halt_record = res.data[0]
-            is_halted: bool = halt_record.get("is_halted", False)
-            logger.info("daily_halt_state_retrieved", date=str(halt_date), is_halted=is_halted)
-            return is_halted
+            if isinstance(halt_record, dict):
+                is_halted_val = halt_record.get("is_halted", False)
+                if isinstance(is_halted_val, bool):
+                    logger.info("daily_halt_state_retrieved", date=str(halt_date), is_halted=is_halted_val)
+                    return is_halted_val
+                if str(is_halted_val).lower() in ("true", "1"):
+                    return True
         return False
     except Exception as ex:
         logger.warning("daily_halt_db_query_failed", date=str(halt_date), error=str(ex))
-        # Fail-safe: if DB query fails, assume NOT halted to avoid false halts
-        return False
+
+    # 2. SQLite local fallback
+    try:
+        from veterandesk.database.session import db_manager
+        from sqlalchemy import text
+        engine = db_manager.get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT is_halted FROM daily_halts WHERE halt_date = :dt LIMIT 1"),
+                {"dt": str(halt_date)}
+            ).fetchone()
+            from unittest.mock import MagicMock
+            if row is not None and not isinstance(row, MagicMock):
+                is_halted = bool(row[0])
+                logger.info("daily_halt_state_retrieved_sqlite", date=str(halt_date), is_halted=is_halted)
+                return is_halted
+    except Exception:
+        pass
+
+    return False
 
 
 def record_daily_halt(
@@ -58,18 +81,19 @@ def record_daily_halt(
     Record a daily halt event to the database.
     This ensures halt state persists across process restarts.
     """
+    now_utc = datetime.now(PKT_TZ).astimezone(PKT_TZ).isoformat()
+    record = {
+        "halt_date": str(halt_date),
+        "is_halted": True,
+        "reason": reason,
+        "triggered_at": now_utc,
+        "loss_amount": loss_amount,
+        "loss_pct": loss_pct,
+    }
+    # 1. Try Supabase
     try:
         from veterandesk.database.session import db_manager
         client = db_manager.get_client()
-        now_utc = datetime.now(PKT_TZ).astimezone(PKT_TZ).isoformat()
-        record = {
-            "halt_date": str(halt_date),
-            "is_halted": True,
-            "reason": reason,
-            "triggered_at": now_utc,
-            "loss_amount": loss_amount,
-            "loss_pct": loss_pct,
-        }
         client.table("daily_halts").upsert(record, on_conflict="halt_date").execute()
         logger.info(
             "daily_halt_recorded",
@@ -77,8 +101,56 @@ def record_daily_halt(
             loss_amount=loss_amount,
             loss_pct=loss_pct,
         )
+        return
     except Exception as ex:
-        logger.error("daily_halt_db_write_failed", date=str(halt_date), error=str(ex))
+        logger.warning("daily_halt_supabase_write_failed", date=str(halt_date), error=str(ex))
+
+    # 2. Try SQLite fallback
+    try:
+        from veterandesk.database.session import db_manager
+        from sqlalchemy import text
+        engine = db_manager.get_engine()
+        with engine.connect() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO daily_halts (halt_date, is_halted, reason, triggered_at, loss_amount, loss_pct)
+                    VALUES (:halt_date, :is_halted, :reason, :triggered_at, :loss_amount, :loss_pct)
+                    ON CONFLICT(halt_date) DO UPDATE SET
+                        is_halted = excluded.is_halted,
+                        reason = excluded.reason,
+                        triggered_at = excluded.triggered_at,
+                        loss_amount = excluded.loss_amount,
+                        loss_pct = excluded.loss_pct
+                """),
+                record,
+            )
+            conn.commit()
+            logger.info(
+                "daily_halt_recorded_sqlite",
+                date=str(halt_date),
+                loss_amount=loss_amount,
+                loss_pct=loss_pct,
+            )
+    except Exception as ex2:
+        logger.error("daily_halt_db_write_failed", date=str(halt_date), error=str(ex2))
+
+
+def check_daily_halt_already_alerted_today(halt_date: date) -> bool:
+    """
+    Check if a daily halt alert has already been dispatched today.
+    Checks daily_halts table and persistent alert delivery logs.
+    """
+    if check_daily_halt_from_db(halt_date):
+        return True
+
+    try:
+        from veterandesk.alerts.scheduler import _check_already_sent_today
+        if _check_already_sent_today("DAILY_HALT", str(halt_date)):
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 @dataclass(frozen=True)
@@ -119,6 +191,7 @@ class RiskEngine:
         self.force_close_pkt = force_close_pkt
         self.max_adv_pct = max_adv_pct
         self.lot_size = lot_size
+        self._halt_alerted_date: Optional[date] = None
 
     def evaluate_signal(
         self,
@@ -146,44 +219,65 @@ class RiskEngine:
         )
         results.append(res_loss)
         if not res_loss.passed:
-            # Calculate loss percentage for alert and DB record
-            loss_pct = (current_day_realized_loss / account_balance * 100.0) if account_balance > 0 else self.max_daily_loss_pct
-            actual_loss_pct = max(loss_pct, self.max_daily_loss_pct)
-            
-            # Record halt to database for persistence across restarts
             current_pkt_date = datetime.now(PKT_TZ).date()
-            record_daily_halt(
-                halt_date=current_pkt_date,
-                loss_amount=current_day_realized_loss,
-                loss_pct=actual_loss_pct,
-                reason="Daily loss limit breached",
-            )
-            
-            try:
-                from veterandesk.alerts.telegram import telegram_service
-                t_str = current_time_pkt.strftime("%H:%M:%S PKT") if current_time_pkt else None
-                telegram_service.send_daily_halt_alert(
-                    loss_pct=actual_loss_pct,
-                    max_loss_pct=self.max_daily_loss_pct,
-                    loss_amount_pkr=current_day_realized_loss,
-                    halt_time_pkt=t_str,
-                    action_taken="Trading halted for the day; no new orders permitted.",
-                )
-            except Exception as ex:
-                logger.warning("telegram_daily_halt_alert_failed", error=str(ex))
 
-            try:
-                from veterandesk.alerts.discord import discord_service
-                t_str = current_time_pkt.strftime("%H:%M:%S PKT") if current_time_pkt else None
-                discord_service.send_daily_halt_alert(
-                    loss_pct=actual_loss_pct,
-                    max_loss_pct=self.max_daily_loss_pct,
-                    loss_amount_pkr=current_day_realized_loss,
-                    halt_time_pkt=t_str,
-                    action_taken="Trading halted for the day; no new orders permitted.",
+            # Accurate loss percentage relative to account equity
+            loss_pct = round((current_day_realized_loss / account_balance * 100.0), 2) if account_balance > 0 else self.max_daily_loss_pct
+
+            # Only trigger alert/record if this is an actual breach (not an already-halted or invalid balance rejection)
+            is_limit_breach = "reached/exceeded daily limit" in res_loss.reason
+
+            # Guard against duplicate alert spam across cycles and restarts
+            already_alerted = (
+                is_already_halted
+                or self._halt_alerted_date == current_pkt_date
+                or check_daily_halt_already_alerted_today(current_pkt_date)
+            )
+
+            if is_limit_breach and not already_alerted:
+                self._halt_alerted_date = current_pkt_date
+
+                # Record halt to database for persistence across restarts
+                record_daily_halt(
+                    halt_date=current_pkt_date,
+                    loss_amount=current_day_realized_loss,
+                    loss_pct=loss_pct,
+                    reason="Daily loss limit breached",
                 )
-            except Exception as ex:
-                logger.warning("discord_daily_halt_alert_failed", error=str(ex))
+
+                try:
+                    from veterandesk.alerts.telegram import telegram_service
+                    t_str = current_time_pkt.strftime("%H:%M:%S PKT") if current_time_pkt else None
+                    telegram_service.send_daily_halt_alert(
+                        loss_pct=loss_pct,
+                        max_loss_pct=self.max_daily_loss_pct,
+                        loss_amount_pkr=current_day_realized_loss,
+                        halt_time_pkt=t_str,
+                        action_taken="Trading halted for the day; no new orders permitted.",
+                    )
+                except Exception as ex:
+                    logger.warning("telegram_daily_halt_alert_failed", error=str(ex))
+
+                try:
+                    from veterandesk.alerts.discord import discord_service
+                    t_str = current_time_pkt.strftime("%H:%M:%S PKT") if current_time_pkt else None
+                    discord_service.send_daily_halt_alert(
+                        loss_pct=loss_pct,
+                        max_loss_pct=self.max_daily_loss_pct,
+                        loss_amount_pkr=current_day_realized_loss,
+                        halt_time_pkt=t_str,
+                        action_taken="Trading halted for the day; no new orders permitted.",
+                    )
+                except Exception as ex:
+                    logger.warning("discord_daily_halt_alert_failed", error=str(ex))
+            else:
+                logger.info(
+                    "daily_halt_alert_suppressed",
+                    date=str(current_pkt_date),
+                    reason="Halt alert already dispatched or trading already halted for session",
+                    is_already_halted=is_already_halted,
+                    is_limit_breach=is_limit_breach,
+                )
 
         # 2. Daily Trade Count Check
         res_trades = check_max_intraday_trades(

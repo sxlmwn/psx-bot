@@ -86,6 +86,7 @@ class TradingEngine:
         self.scraper = scraper or PSXDpsScraper()
         self.tickers_traded_today: Set[str] = set()
         self.current_session_date: Optional[date] = None
+        self.is_halted_today: bool = False
         self.cycle_count: int = 0
         self._is_running: bool = False
         self._thread: Optional[threading.Thread] = None
@@ -101,6 +102,7 @@ class TradingEngine:
             logger.info("new_trading_session_initialized", date=str(today), previous=str(self.current_session_date))
             self.current_session_date = today
             self.tickers_traded_today.clear()
+            self.is_halted_today = False
             # Reload any open trades from database
             self.broker.load_open_trades_from_db()
             for t in self.broker.open_trades.values():
@@ -111,9 +113,14 @@ class TradingEngine:
 
     def _is_already_halted_today(self) -> bool:
         """Check if trading is already halted for the current PKT date."""
+        if self.is_halted_today:
+            return True
         if self.current_session_date is None:
             return False
-        return check_daily_halt_from_db(self.current_session_date)
+        halted = check_daily_halt_from_db(self.current_session_date)
+        if halted:
+            self.is_halted_today = True
+        return halted
 
     def check_open_positions_for_exits(self, now_pkt: datetime) -> List[DemoTrade]:
         """
@@ -239,7 +246,25 @@ class TradingEngine:
         # Step 1: Manage Exits on Open Positions
         closed_trades = self.check_open_positions_for_exits(current_pkt)
 
-        # Step 2: If Market is Closed and Not Forcing Scan, Idle Gracefully
+        # Step 2: If Trading Already Halted Today, Do Not Scan or Enter New Trades
+        if self._is_already_halted_today():
+            duration = time.perf_counter() - start_time
+            logger.info(
+                "trading_cycle_halted_daily_limit",
+                cycle=self.cycle_count,
+                date=str(today),
+                closed_trades=[t.trade_id for t in closed_trades],
+                duration_sec=round(duration, 2),
+            )
+            return {
+                "cycle": self.cycle_count,
+                "status": "HALTED_DAILY_LOSS_LIMIT",
+                "market_status_msg": "Trading halted for session due to daily loss limit",
+                "closed_trades": [t.trade_id for t in closed_trades],
+                "duration_sec": round(duration, 2),
+            }
+
+        # Step 3: If Market is Closed and Not Forcing Scan, Idle Gracefully
         if not should_scan:
             duration = time.perf_counter() - start_time
             logger.info(
@@ -256,7 +281,7 @@ class TradingEngine:
                 "duration_sec": round(duration, 2),
             }
 
-        # Step 3: Scan Watchlist Tickers
+        # Step 4: Scan Watchlist Tickers
         watchlist = settings.watchlist
         signals_evaluated = 0
         signals_fired = 0
@@ -406,7 +431,6 @@ class TradingEngine:
             realized_loss = abs(min(0.0, self.ledger.realized_pnl))
             trades_today = len(self.broker.closed_trades) + len(self.broker.open_trades)
             is_already_halted = self._is_already_halted_today()
-
             account_equity = self.ledger.total_equity if self.ledger.total_equity > 0 else self.ledger.starting_balance
 
             assessment = self.risk_engine.evaluate_signal(
@@ -421,6 +445,8 @@ class TradingEngine:
             )
 
             if not assessment.is_approved:
+                if any("daily limit" in r.lower() or "halted for the day" in r.lower() for r in assessment.rejection_reasons):
+                    self.is_halted_today = True
                 logger.warning(
                     "risk_engine_rejected_signal",
                     ticker=ticker,

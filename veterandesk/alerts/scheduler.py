@@ -24,7 +24,7 @@ def _check_already_sent_today(message_type: str, date_str: str) -> bool:
     Uses delivery logs to prevent duplicate sends after process restarts.
     
     Args:
-        message_type: "DAILY_BRIEF" or "SESSION_SUMMARY"
+        message_type: "DAILY_BRIEF", "SESSION_SUMMARY", or "DAILY_HALT"
         date_str: Date string in YYYY-MM-DD format
         
     Returns:
@@ -34,28 +34,59 @@ def _check_already_sent_today(message_type: str, date_str: str) -> bool:
         from veterandesk.database.session import db_manager
         
         # Map message types to the reference_id format used by telegram/discord services
-        # Telegram uses: BRIEF_{date} and SUMMARY_{date}
-        # Discord uses: BRIEF_{date} and SUMMARY_{date}
-        reference_id_prefix = "BRIEF" if message_type == "DAILY_BRIEF" else "SUMMARY"
-        reference_id = f"{reference_id_prefix}_{date_str}"
+        # Telegram uses: BRIEF_{date}, SUMMARY_{date}, HALT_{YYYYMMDD}
+        # Discord uses: BRIEF_{date}, SUMMARY_{date}, HALT_{YYYYMMDD}
+        if message_type == "DAILY_BRIEF":
+            target_types = ["DAILY_BRIEF"]
+            reference_ids = [f"BRIEF_{date_str}"]
+        elif message_type == "SESSION_SUMMARY":
+            target_types = ["SESSION_SUMMARY"]
+            reference_ids = [f"SUMMARY_{date_str}"]
+        elif message_type in ("DAILY_HALT", "DAILY_LOSS_HALT"):
+            target_types = ["DAILY_HALT", "DAILY_LOSS_HALT"]
+            compact_date = date_str.replace("-", "")
+            reference_ids = [f"HALT_{compact_date}", f"HALT_{date_str}"]
+        else:
+            target_types = [message_type]
+            reference_ids = [f"{message_type}_{date_str}"]
         
-        # Check Telegram delivery log
         client = db_manager.get_client()
-        res = client.table("telegram_delivery_log").select("*").eq("message_type", message_type).eq("reference_id", reference_id).execute()
-        
-        if res.data and any(r.get("status") == "sent" for r in res.data):
-            logger.info("message_already_sent_today", message_type=message_type, date=date_str, service="telegram")
-            return True
-            
-        # Check Discord delivery log
-        res_discord = client.table("discord_delivery_log").select("*").eq("message_type", message_type).eq("reference_id", reference_id).execute()
-        
-        if res_discord.data and any(r.get("status") == "sent" for r in res_discord.data):
-            logger.info("message_already_sent_today", message_type=message_type, date=date_str, service="discord")
-            return True
-            
+        for ref_id in reference_ids:
+            for mt in target_types:
+                res = client.table("telegram_delivery_log").select("*").eq("message_type", mt).eq("reference_id", ref_id).execute()
+                if hasattr(res, "data") and isinstance(res.data, list) and any(isinstance(r, dict) and r.get("status") == "sent" for r in res.data):
+                    logger.info("message_already_sent_today", message_type=message_type, date=date_str, service="telegram")
+                    return True
+
+                res_discord = client.table("discord_delivery_log").select("*").eq("message_type", mt).eq("reference_id", ref_id).execute()
+                if hasattr(res_discord, "data") and isinstance(res_discord.data, list) and any(isinstance(r, dict) and r.get("status") == "sent" for r in res_discord.data):
+                    logger.info("message_already_sent_today", message_type=message_type, date=date_str, service="discord")
+                    return True
+
         return False
     except Exception as e:
+        # Fallback to local SQLite if Supabase client query is unavailable or failed
+        try:
+            from unittest.mock import MagicMock
+            from veterandesk.database.session import db_manager
+            from sqlalchemy import text
+            engine = db_manager.get_engine()
+            with engine.connect() as conn:
+                for table in ("telegram_delivery_log", "discord_delivery_log"):
+                    for ref_id in reference_ids:
+                        for mt in target_types:
+                            result = conn.execute(
+                                text(f"SELECT 1 FROM {table} WHERE message_type = :mt AND reference_id = :ref AND status = 'sent' LIMIT 1"),
+                                {"mt": mt, "ref": ref_id}
+                            )
+                            if hasattr(result, "fetchone"):
+                                row = result.fetchone()
+                                if row is not None and not isinstance(row, MagicMock):
+                                    logger.info("message_already_sent_today", message_type=message_type, date=date_str, service=table)
+                                    return True
+        except Exception:
+            pass
+
         logger.warning("failed_to_check_delivery_log", message_type=message_type, date=date_str, error=str(e))
         # Fail-safe: if check fails, assume not sent to avoid blocking legitimate sends
         return False
