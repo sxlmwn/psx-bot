@@ -324,12 +324,21 @@ class TestRiskEnginePipeline:
 
         # Test edge case: exactly at the 2% threshold (10,000 PKR on 500,000 balance)
         exact_threshold_loss = 10000.0
+        engine2 = RiskEngine(
+            max_risk_per_trade_pct=1.00,
+            max_daily_loss_pct=2.00,
+            max_intraday_trades=3,
+            entry_cutoff_pkt=time(15, 0, 0),
+            force_close_pkt=time(15, 20, 0),
+            max_adv_pct=5.00,
+            lot_size=1
+        )
         with patch('veterandesk.alerts.telegram.telegram_service') as mock_telegram, \
              patch('veterandesk.alerts.discord.discord_service') as mock_discord:
             mock_telegram.send_daily_halt_alert = MagicMock()
             mock_discord.send_daily_halt_alert = MagicMock()
 
-            assessment = engine.evaluate_signal(
+            assessment = engine2.evaluate_signal(
                 signal=sig,
                 account_balance=500000.0,
                 current_day_realized_loss=exact_threshold_loss,
@@ -347,3 +356,191 @@ class TestRiskEnginePipeline:
 
             assert telegram_call_kwargs['loss_amount_pkr'] == exact_threshold_loss
             assert discord_call_kwargs['loss_amount_pkr'] == exact_threshold_loss
+
+    def test_daily_halt_alert_deduplication_fires_exactly_once(self):
+        """
+        Regression Test for Bug: Daily halt alert spamming 11 times in 8 minutes.
+        Assert that calling evaluate_signal 11 consecutive times while the halt condition
+        persists only fires the alert ONCE, and subsequent calls suppress duplicate alerts.
+        """
+        from datetime import datetime, timezone
+        engine = RiskEngine(
+            max_risk_per_trade_pct=1.00,
+            max_daily_loss_pct=2.00,
+        )
+        sig = TradeSignal(
+            signal_id="TEST_SPAM_SIG",
+            ticker="OGDC",
+            entry_price=100.0,
+            stop_loss=95.0,
+            target_price=107.5,
+            reward_risk_ratio=1.5,
+            position_size=0,
+            confidence_pct=60,
+            invalidation_reason="Test invalidation",
+            created_at=datetime.now(timezone.utc),
+            session_id="test_sess"
+        )
+
+        with patch('veterandesk.alerts.telegram.telegram_service') as mock_telegram, \
+             patch('veterandesk.alerts.discord.discord_service') as mock_discord:
+            mock_telegram.send_daily_halt_alert = MagicMock()
+            mock_discord.send_daily_halt_alert = MagicMock()
+
+            # Simulate 11 consecutive polling cycles with persistent daily loss breach
+            assessments = []
+            for cycle in range(1, 12):
+                assessment = engine.evaluate_signal(
+                    signal=sig,
+                    account_balance=500000.0,
+                    current_day_realized_loss=10500.0,  # 2.10% loss > 2.00% limit
+                    trades_executed_today=1,
+                    current_time_pkt=time(14, 51 + (cycle // 2), (cycle % 2) * 30),
+                    twenty_day_adv=5000000.0,
+                    open_positions=[],
+                    is_already_halted=False,
+                )
+                assessments.append(assessment)
+
+            # Invariant 1: ALL 11 cycles reject the signal (discipline invariant preserved)
+            assert len(assessments) == 11
+            for a in assessments:
+                assert a.is_approved is False
+
+            # Invariant 2: Alert is dispatched EXACTLY ONCE (no alert spam)
+            assert mock_telegram.send_daily_halt_alert.call_count == 1
+            assert mock_discord.send_daily_halt_alert.call_count == 1
+
+            # Invariant 3: Correct, un-inflated loss percentage and amount dispatched
+            tg_kwargs = mock_telegram.send_daily_halt_alert.call_args[1]
+            assert tg_kwargs["loss_pct"] == 2.10
+            assert tg_kwargs["loss_amount_pkr"] == 10500.0
+
+    def test_daily_loss_percentage_computation_with_open_positions(self):
+        """
+        Regression Test for Bug: 121.18% daily loss calculation.
+        Scenario from 2026-09-16:
+        - Starting balance: PKR 500,000.00
+        - Trade 1 exits with realized loss: PKR 4,019.20
+        - Trade 2 (UBL) is entered, deploying ~PKR 492,664 into holdings
+        - Cash balance remaining is only PKR 3,316.72
+        - Total account equity is PKR 495,980.80 (~PKR 500k)
+        Assert:
+        1. Using account equity gives ~0.81% (or 0.80% on starting capital), well below 2% limit.
+        2. Signal is NOT rejected by daily loss rule.
+        3. If cash balance (3,316.72) were mistakenly used as denominator, it would give 121.18%.
+        """
+        from datetime import datetime, timezone
+        from veterandesk.execution.ledger import DoubleEntryLedger, AccountType
+
+        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0)
+
+        # Simulate Trade 1 exit with 4,019.20 PKR realized gross loss
+        ledger.record_transaction(
+            transaction_id="TX_EXIT_1",
+            trade_id="TRD_1",
+            description="EXIT trade 1 with loss",
+            items=[
+                (AccountType.CASH, 95980.80, 0.0),
+                (AccountType.EQUITY_HOLDINGS, 0.0, 100000.00),
+                (AccountType.REALIZED_PNL, 4019.20, 0.0),
+            ]
+        )
+
+        # Simulate Trade 2 entry: BUY deploying cash into equity holdings
+        # Leaving cash balance at exactly PKR 3,316.72
+        cash_to_invest = ledger.cash_balance - 3316.72
+        ledger.record_transaction(
+            transaction_id="TX_BUY_2",
+            trade_id="TRD_2",
+            description="BUY trade 2 open position",
+            items=[
+                (AccountType.EQUITY_HOLDINGS, cash_to_invest, 0.0),
+                (AccountType.CASH, 0.0, cash_to_invest),
+            ]
+        )
+
+        assert round(ledger.cash_balance, 2) == 3316.72
+        assert round(ledger.total_equity, 2) == 495980.80
+
+        # Math verification of the 2026-09-16 bug:
+        realized_loss = abs(ledger.realized_pnl)
+        assert realized_loss == 4019.20
+
+        wrong_loss_pct = (realized_loss / ledger.cash_balance) * 100.0
+        assert round(wrong_loss_pct, 2) == 121.18  # Exactly reproduced the reported bug!
+
+        correct_loss_pct = (realized_loss / ledger.total_equity) * 100.0
+        assert round(correct_loss_pct, 2) == 0.81  # True small single-digit loss relative to equity!
+
+        # Now evaluate signal with RiskEngine using total_equity
+        engine = RiskEngine()
+        sig = TradeSignal(
+            signal_id="TEST_UBL_CYCLE",
+            ticker="HUBC",
+            entry_price=100.0,
+            stop_loss=98.0,
+            target_price=105.0,
+            reward_risk_ratio=2.5,
+            position_size=0,
+            confidence_pct=75,
+            invalidation_reason="Test",
+            created_at=datetime.now(timezone.utc),
+            session_id="test_sess"
+        )
+
+        with patch('veterandesk.alerts.telegram.telegram_service') as mock_tg, \
+             patch('veterandesk.alerts.discord.discord_service') as mock_dc:
+            assessment = engine.evaluate_signal(
+                signal=sig,
+                account_balance=ledger.total_equity,
+                current_day_realized_loss=realized_loss,
+                trades_executed_today=1,
+                current_time_pkt=time(14, 51, 0),
+                twenty_day_adv=5000000.0,
+                open_positions=[{"ticker": "UBL", "shares": 1000}],
+                is_already_halted=False,
+            )
+
+            # Daily loss limit check MUST pass
+            loss_rule = next(r for r in assessment.rule_results if r.rule_name == "daily_loss_limit")
+            assert loss_rule.passed is True
+            assert "is below limit 2.00%" in loss_rule.reason
+
+            # No daily halt alert was sent!
+            mock_tg.send_daily_halt_alert.assert_not_called()
+            mock_dc.send_daily_halt_alert.assert_not_called()
+
+    def test_daily_halt_alert_negative_pnl_formatting(self):
+        """
+        Regression Test for Bug: Total Realized Loss showing positive sign (+4,019.20).
+        Assert that alert messages/embeds explicitly display a negative sign (-4,019.20)
+        and never a positive sign.
+        """
+        from veterandesk.alerts.telegram import telegram_service
+        from veterandesk.alerts.discord import discord_service
+
+        # Telegram message
+        tg_text = telegram_service.format_daily_loss_halt_message(
+            loss_pct=2.10,
+            max_loss_pct=2.00,
+            loss_amount_pkr=4019.20,
+            halt_time_pkt="14:51:00 PKT",
+            action_taken="Trading halted for the session.",
+        )
+        assert "-4,019.20" in tg_text
+        assert "+4,019.20" not in tg_text
+        assert "2.10%" in tg_text
+
+        # Discord embed
+        dc_embed = discord_service.format_daily_loss_halt_embed(
+            loss_pct=2.10,
+            max_loss_pct=2.00,
+            loss_amount_pkr=4019.20,
+            halt_time_pkt="14:51:00 PKT",
+            action_taken="Trading halted for the session.",
+        )
+        fields = {f["name"]: f["value"] for f in dc_embed["fields"]}
+        loss_val = fields["Total Realized Loss"]
+        assert "-4,019.20" in loss_val
+        assert "+4,019.20" not in loss_val
