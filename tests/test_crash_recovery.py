@@ -295,3 +295,155 @@ class TestCrashRecoveryAndPersistence:
             # Clean up temporary database
             if os.path.exists(temp_db_path):
                 os.unlink(temp_db_path)
+
+    def test_ledger_state_persists_across_worker_restart(self) -> None:
+        """
+        Regression test for balance reset bug (Issue A).
+        Simulate worker restart and verify ledger loads persisted state from DB
+        instead of resetting to starting balance.
+        """
+        from veterandesk.execution.ledger import AccountType
+        
+        # Mock database with existing ledger entries showing a loss
+        mock_client = MagicMock()
+        mock_ledger_data = [
+            {
+                "id": "entry1",
+                "transaction_id": "TX_BUY_TRD1",
+                "trade_id": "TRD1",
+                "account_name": "CASH",
+                "debit": 0.0,
+                "credit": 50000.0,
+                "balance_after": 450000.0,
+                "description": "BUY 500 OGDC @ 100.00",
+                "created_at": "2026-09-16T10:00:00+00:00"
+            },
+            {
+                "id": "entry2",
+                "transaction_id": "TX_BUY_TRD1",
+                "trade_id": "TRD1",
+                "account_name": "EQUITY_HOLDINGS",
+                "debit": 50000.0,
+                "credit": 0.0,
+                "balance_after": 50000.0,
+                "description": "BUY 500 OGDC @ 100.00",
+                "created_at": "2026-09-16T10:00:00+00:00"
+            },
+            {
+                "id": "entry3",
+                "transaction_id": "TX_EXIT_TRD1",
+                "trade_id": "TRD1",
+                "account_name": "CASH",
+                "debit": 49200.0,
+                "credit": 0.0,
+                "balance_after": 499200.0,
+                "description": "EXIT 500 OGDC @ 98.40 (STOP_HIT)",
+                "created_at": "2026-09-16T14:00:00+00:00"
+            },
+            {
+                "id": "entry4",
+                "transaction_id": "TX_EXIT_TRD1",
+                "trade_id": "TRD1",
+                "account_name": "EQUITY_HOLDINGS",
+                "debit": 0.0,
+                "credit": 50000.0,
+                "balance_after": 0.0,
+                "description": "EXIT 500 OGDC @ 98.40 (STOP_HIT)",
+                "created_at": "2026-09-16T14:00:00+00:00"
+            },
+            {
+                "id": "entry5",
+                "transaction_id": "TX_EXIT_TRD1",
+                "trade_id": "TRD1",
+                "account_name": "REALIZED_PNL",
+                "debit": 800.0,
+                "credit": 0.0,
+                "balance_after": -800.0,
+                "description": "EXIT 500 OGDC @ 98.40 (STOP_HIT)",
+                "created_at": "2026-09-16T14:00:00+00:00"
+            }
+        ]
+        mock_client.table.return_value.select.return_value.order.return_value.execute.return_value = MagicMock(data=mock_ledger_data)
+        
+        with patch('veterandesk.database.session.db_manager') as mock_db_manager:
+            mock_db_manager.get_client.return_value = mock_client
+            
+            # Create ledger with load_from_db=True (simulating worker restart)
+            ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=True)
+            
+            # Verify ledger loaded the persisted state, not starting balance
+            assert ledger.cash_balance == 499200.0, f"Expected 499200.0, got {ledger.cash_balance}"
+            assert ledger.equity_holdings_value == 0.0
+            assert ledger.realized_pnl == -800.0
+            assert len(ledger.entries) == 5
+            
+            # Verify the DB was called to load state
+            mock_client.table.assert_called_with("demo_ledger")
+            
+    def test_ledger_starts_fresh_when_db_empty(self) -> None:
+        """
+        Verify ledger starts with fresh state when DB is empty (first run).
+        """
+        mock_client = MagicMock()
+        mock_client.table.return_value.select.return_value.order.return_value.execute.return_value = MagicMock(data=[])
+        
+        with patch('veterandesk.database.session.db_manager') as mock_db_manager:
+            mock_db_manager.get_client.return_value = mock_client
+            
+            # Create ledger with load_from_db=True on empty DB
+            ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=True)
+            
+            # Should start with fresh state
+            assert ledger.cash_balance == 500000.0
+            assert ledger.equity_holdings_value == 0.0
+            assert ledger.realized_pnl == 0.0
+            assert len(ledger.entries) == 0
+
+    def test_daily_brief_deduplication_prevents_race_condition(self) -> None:
+        """
+        Regression test for duplicate Daily Brief messages (Issue B).
+        Simulate two near-simultaneous calls to Daily Brief job and verify only one is dispatched.
+        """
+        from veterandesk.alerts.scheduler import _try_reserve_daily_brief_slot
+        
+        mock_client = MagicMock()
+        
+        # First call should succeed in reserving the slot
+        mock_client.table.return_value.insert.return_value.execute.return_value = MagicMock()
+        
+        with patch('veterandesk.database.session.db_manager') as mock_db_manager:
+            mock_db_manager.get_client.return_value = mock_client
+            
+            # First caller reserves slot successfully
+            first_reservation = _try_reserve_daily_brief_slot("2026-09-17")
+            assert first_reservation is True
+            
+            # Second caller should fail to reserve (slot already taken)
+            # Simulate database constraint violation
+            mock_client.table.return_value.insert.side_effect = Exception("duplicate key value violates unique constraint")
+            second_reservation = _try_reserve_daily_brief_slot("2026-09-17")
+            assert second_reservation is False
+            
+    def test_session_summary_deduplication_prevents_race_condition(self) -> None:
+        """
+        Regression test for duplicate Session Summary messages.
+        Simulate two near-simultaneous calls to Session Summary job and verify only one is dispatched.
+        """
+        from veterandesk.alerts.scheduler import _try_reserve_session_summary_slot
+        
+        mock_client = MagicMock()
+        
+        # First call should succeed in reserving the slot
+        mock_client.table.return_value.insert.return_value.execute.return_value = MagicMock()
+        
+        with patch('veterandesk.database.session.db_manager') as mock_db_manager:
+            mock_db_manager.get_client.return_value = mock_client
+            
+            # First caller reserves slot successfully
+            first_reservation = _try_reserve_session_summary_slot("2026-09-17")
+            assert first_reservation is True
+            
+            # Second caller should fail to reserve (slot already taken)
+            mock_client.table.return_value.insert.side_effect = Exception("duplicate key value violates unique constraint")
+            second_reservation = _try_reserve_session_summary_slot("2026-09-17")
+            assert second_reservation is False
