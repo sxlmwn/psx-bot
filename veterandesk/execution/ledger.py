@@ -73,9 +73,14 @@ class DoubleEntryLedger:
             client = db_manager.get_client()
             
             # Fetch all ledger entries ordered by creation time
-            res = client.table("demo_ledger").select("*").order("created_at", desc=True).execute()
+            # Use simpler query to avoid "JSON could not be generated" error
+            res = client.table("demo_ledger").select("*").execute()
             
-            if not res.data or len(res.data) == 0:
+            if not hasattr(res, "data") or not res.data:
+                logger.info("ledger_db_empty_starting_fresh", starting_balance=self.starting_balance)
+                return
+            
+            if len(res.data) == 0:
                 logger.info("ledger_db_empty_starting_fresh", starting_balance=self.starting_balance)
                 return
             
@@ -110,7 +115,7 @@ class DoubleEntryLedger:
                     
                     # Reconstruct entry
                     entry = LedgerEntry(
-                        id=row.get("id", ""),
+                        id=str(row.get("id", "")),
                         transaction_id=row.get("transaction_id", ""),
                         trade_id=row.get("trade_id"),
                         account=account,
@@ -118,7 +123,7 @@ class DoubleEntryLedger:
                         credit=credit,
                         balance_after=balance_after,
                         description=row.get("description", ""),
-                        created_at=datetime.fromisoformat(row.get("created_at", "").replace("Z", "+00:00"))
+                        created_at=datetime.fromisoformat(str(row.get("created_at", "")).replace("Z", "+00:00"))
                     )
                     loaded_entries.append(entry)
                     
@@ -145,8 +150,9 @@ class DoubleEntryLedger:
             )
             
         except Exception as e:
-            logger.warning("ledger_db_load_failed", error=str(e))
-            # Continue with fresh state if DB load fails
+            logger.critical("ledger_db_load_failed_critical", error=str(e), error_type=type(e).__name__)
+            # Fail loudly instead of silently defaulting to starting balance
+            raise RuntimeError(f"CRITICAL: Failed to load ledger state from database: {e}") from e
 
     @property
     def cash_balance(self) -> float:

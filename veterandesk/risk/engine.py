@@ -36,19 +36,22 @@ def check_daily_halt_from_db(halt_date: date) -> bool:
     try:
         from veterandesk.database.session import db_manager
         client = db_manager.get_client()
-        res = client.table("daily_halts").select("*").eq("halt_date", str(halt_date)).execute()
-        if hasattr(res, "data") and isinstance(res.data, list) and len(res.data) > 0:
-            halt_record = res.data[0]
-            if isinstance(halt_record, dict):
-                is_halted_val = halt_record.get("is_halted", False)
-                if isinstance(is_halted_val, bool):
-                    logger.info("daily_halt_state_retrieved", date=str(halt_date), is_halted=is_halted_val)
-                    return is_halted_val
-                if str(is_halted_val).lower() in ("true", "1"):
-                    return True
+        # Use simpler query to avoid "JSON could not be generated" error
+        res = client.table("daily_halts").select("*").execute()
+        
+        if hasattr(res, "data") and isinstance(res.data, list):
+            # Filter for the specific date in Python to avoid complex PostgREST query
+            for row in res.data:
+                if isinstance(row, dict) and row.get("halt_date") == str(halt_date):
+                    is_halted_val = row.get("is_halted", False)
+                    if isinstance(is_halted_val, bool):
+                        logger.info("daily_halt_state_retrieved", date=str(halt_date), is_halted=is_halted_val)
+                        return is_halted_val
+                    if str(is_halted_val).lower() in ("true", "1"):
+                        return True
         return False
     except Exception as ex:
-        logger.warning("daily_halt_db_query_failed", date=str(halt_date), error=str(ex))
+        logger.warning("daily_halt_db_query_failed", date=str(halt_date), error=str(ex), error_type=type(ex).__name__)
 
     # 2. SQLite local fallback
     try:
