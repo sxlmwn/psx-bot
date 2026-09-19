@@ -192,6 +192,44 @@ def fetch_watchlist_snapshot(
     return snapshot
 
 
+def _try_reserve_daily_brief_slot(date_str: str) -> bool:
+    """
+    Attempt to atomically reserve a slot for the Daily Brief for the given date.
+    Uses database upsert with unique constraint to prevent race conditions.
+    
+    Returns True if slot was successfully reserved (first caller), False if already reserved.
+    """
+    try:
+        from veterandesk.database.session import db_manager
+        
+        client = db_manager.get_client()
+        
+        # Try to insert a reservation record
+        # If a record already exists for this date, the upsert will fail due to unique constraint
+        reservation_record = {
+            "message_type": "DAILY_BRIEF",
+            "reference_id": f"BRIEF_{date_str}",
+            "status": "reserved",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Use upsert with on_conflict to attempt atomic reservation
+        # This will only succeed if no record exists for this (message_type, reference_id) pair
+        try:
+            client.table("telegram_delivery_log").insert(reservation_record).execute()
+            logger.info("daily_brief_slot_reserved", date=date_str)
+            return True
+        except Exception as insert_error:
+            # If insert fails, it means the slot is already taken
+            logger.info("daily_brief_slot_already_reserved", date=date_str, error=str(insert_error))
+            return False
+            
+    except Exception as e:
+        logger.warning("daily_brief_slot_reservation_failed", date=date_str, error=str(e))
+        # Fail-safe: if reservation fails, allow send to avoid blocking legitimate sends
+        return True
+
+
 def run_daily_brief_job(
     date_str: Optional[str] = None,
     watchlist_data: Optional[List[Dict[str, Any]]] = None,
@@ -200,13 +238,13 @@ def run_daily_brief_job(
 ) -> bool:
     """
     Scheduled 9:15 AM PKT Job: Formats and dispatches pre-market briefing.
-    Includes idempotency check to prevent duplicate sends after restarts.
+    Includes atomic idempotency check to prevent duplicate sends after restarts.
     """
     now_pkt = datetime.now(PKT_TZ)
     today_str = date_str or now_pkt.strftime("%Y-%m-%d")
 
-    # Idempotency check: skip if already sent today
-    if _check_already_sent_today("DAILY_BRIEF", today_str):
+    # Atomic idempotency check: try to reserve slot, skip if already taken
+    if not _try_reserve_daily_brief_slot(today_str):
         logger.info("daily_brief_already_sent_today", date=today_str, skipped=True)
         return True  # Return True since the job effectively "succeeded" (was already sent)
 
@@ -373,6 +411,39 @@ def fetch_session_summary_metrics(session_date: Optional[str] = None) -> Dict[st
     }
 
 
+def _try_reserve_session_summary_slot(date_str: str) -> bool:
+    """
+    Attempt to atomically reserve a slot for the Session Summary for the given date.
+    Uses database upsert with unique constraint to prevent race conditions.
+    
+    Returns True if slot was successfully reserved (first caller), False if already reserved.
+    """
+    try:
+        from veterandesk.database.session import db_manager
+        
+        client = db_manager.get_client()
+        
+        # Try to insert a reservation record
+        reservation_record = {
+            "message_type": "SESSION_SUMMARY",
+            "reference_id": f"SUMMARY_{date_str}",
+            "status": "reserved",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        try:
+            client.table("telegram_delivery_log").insert(reservation_record).execute()
+            logger.info("session_summary_slot_reserved", date=date_str)
+            return True
+        except Exception as insert_error:
+            logger.info("session_summary_slot_already_reserved", date=date_str, error=str(insert_error))
+            return False
+            
+    except Exception as e:
+        logger.warning("session_summary_slot_reservation_failed", date=date_str, error=str(e))
+        return True
+
+
 def run_session_summary_job(
     session_date: Optional[str] = None,
     trades_count: Optional[int] = None,
@@ -386,13 +457,13 @@ def run_session_summary_job(
 ) -> bool:
     """
     Scheduled 3:45 PM PKT Job: Formats and dispatches post-market session summary.
-    Includes idempotency check to prevent duplicate sends after restarts.
+    Includes atomic idempotency check to prevent duplicate sends after restarts.
     """
     now_pkt = datetime.now(PKT_TZ)
     date_str = session_date or now_pkt.strftime("%Y-%m-%d")
 
-    # Idempotency check: skip if already sent today
-    if _check_already_sent_today("SESSION_SUMMARY", date_str):
+    # Atomic idempotency check: try to reserve slot, skip if already taken
+    if not _try_reserve_session_summary_slot(date_str):
         logger.info("session_summary_already_sent_today", date=date_str, skipped=True)
         return True  # Return True since the job effectively "succeeded" (was already sent)
 
