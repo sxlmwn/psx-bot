@@ -273,7 +273,7 @@ class TestPortfolioAndJournal:
         """
         Verify PaperBroker exit condition evaluation and strict validation in execute_exit.
         """
-        ledger = DoubleEntryLedger(starting_balance_pkr=1000000.0)
+        ledger = DoubleEntryLedger(starting_balance_pkr=1000000.0, load_from_db=False)
         broker = PaperBroker(ledger=ledger, persist_to_db=False)
 
         sig = TradeSignal(

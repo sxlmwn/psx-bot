@@ -16,7 +16,7 @@ from veterandesk.strategy.models import SignalAction, TradeSignal
 
 class TestDoubleEntryLedger:
     def test_single_buy_and_sell_reconciliation(self):
-        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0)
+        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=False)
         broker = PaperBroker(ledger=ledger, slippage_pct=0.0020, persist_to_db=False)
 
         sig = TradeSignal(
@@ -62,7 +62,7 @@ class TestDoubleEntryLedger:
         assert audit_ok is True, audit_msg
 
     def test_ledger_rejects_unbalanced_transactions(self):
-        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0)
+        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=False)
         # Unbalanced: Debit 100 != Credit 50
         with pytest.raises(ValueError, match="Ledger Imbalance"):
             ledger.record_transaction(
@@ -76,7 +76,7 @@ class TestDoubleEntryLedger:
             )
 
     def test_insufficient_funds_rejected(self):
-        ledger = DoubleEntryLedger(starting_balance_pkr=10000.0)  # Low balance
+        ledger = DoubleEntryLedger(starting_balance_pkr=10000.0, load_from_db=False)  # Low balance
         broker = PaperBroker(ledger=ledger, persist_to_db=False)
 
         sig = TradeSignal(
@@ -103,7 +103,7 @@ class TestDoubleEntryLedger:
         """
         random.seed(42)  # Deterministic seed for reproducible tests
         starting_cash = 10000000.0  # 10M PKR to support 1,000 sequential trades
-        ledger = DoubleEntryLedger(starting_balance_pkr=starting_cash)
+        ledger = DoubleEntryLedger(starting_balance_pkr=starting_cash, load_from_db=False)
         broker = PaperBroker(ledger=ledger, slippage_pct=0.0020, persist_to_db=False)
 
         tickers = ["OGDC", "PPL", "ENGRO", "LUCK", "HUBC", "MCB", "SYS", "TRG"]

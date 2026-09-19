@@ -62,7 +62,7 @@ def test_run_trading_cycle_ignores_prior_day_candles() -> None:
     Test that when DPS returns Friday candles on Monday morning at 09:15 PKT,
     the engine filters out Friday candles and does NOT execute any trades.
     """
-    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0)
+    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0, load_from_db=False)
     broker = PaperBroker(ledger=ledger, persist_to_db=False)
     risk_engine = RiskEngine()
     scraper = MagicMock()
@@ -109,7 +109,7 @@ def test_run_trading_cycle_accepts_today_candles_and_executes() -> None:
     Test that when today's candles are available, the engine detects breakout
     and executes trade normally.
     """
-    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0)
+    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0, load_from_db=False)
     broker = PaperBroker(ledger=ledger, persist_to_db=False)
     risk_engine = RiskEngine()
     scraper = MagicMock()
@@ -165,7 +165,7 @@ def test_run_trading_cycle_accepts_today_candles_and_executes() -> None:
 
 def test_stale_signal_timestamp_rejected_by_engine() -> None:
     """Test defense-in-depth: if compute_orb_signal returns a signal with stale date, reject it."""
-    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0)
+    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0, load_from_db=False)
     broker = PaperBroker(ledger=ledger, persist_to_db=False)
     risk_engine = RiskEngine()
     scraper = MagicMock()
@@ -226,7 +226,7 @@ def test_stale_signal_timestamp_rejected_by_engine() -> None:
 
 def test_force_close_at_1520_when_scraper_fails() -> None:
     """Test that at 15:20 PKT, positions are force closed even if scraper quote fetch returns None."""
-    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0)
+    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0, load_from_db=False)
     broker = PaperBroker(ledger=ledger, persist_to_db=False)
     scraper = MagicMock()
     engine = TradingEngine(ledger=ledger, broker=broker, scraper=scraper)
@@ -265,7 +265,7 @@ def test_force_close_at_1520_when_scraper_fails() -> None:
 
 def test_stale_overnight_position_force_closed() -> None:
     """Test that an open position held overnight from a previous session is immediately force-closed."""
-    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0)
+    ledger = DoubleEntryLedger(starting_balance_pkr=500_000.0, load_from_db=False)
     broker = PaperBroker(ledger=ledger, persist_to_db=False)
     scraper = MagicMock()
     engine = TradingEngine(ledger=ledger, broker=broker, scraper=scraper)

@@ -206,7 +206,7 @@ class TestCoverageExpansion:
             assert rec.verdict == TradeVerdict.RIGHT
 
     def test_paper_broker_invalid_buy_conditions(self):
-        ledger = DoubleEntryLedger(starting_balance_pkr=1000.0)
+        ledger = DoubleEntryLedger(starting_balance_pkr=1000.0, load_from_db=False)
         broker = PaperBroker(ledger=ledger, persist_to_db=False)
 
         # 1. Invalid shares count

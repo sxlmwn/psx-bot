@@ -433,7 +433,7 @@ class TestRiskEnginePipeline:
         from datetime import datetime, timezone
         from veterandesk.execution.ledger import DoubleEntryLedger, AccountType
 
-        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0)
+        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=False)
 
         # Simulate Trade 1 exit with 4,019.20 PKR realized gross loss
         ledger.record_transaction(

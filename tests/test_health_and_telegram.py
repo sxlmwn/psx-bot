@@ -48,7 +48,7 @@ from veterandesk.strategy.orb import compute_orb_signal
 
 class TestHealthAndAlerts:
     def test_health_monitor_heartbeat_and_down_detection(self) -> None:
-        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0)
+        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=False)
         monitor = SystemHealthMonitor(ledger=ledger)
 
         # Immediate check -> not down
@@ -475,7 +475,7 @@ class TestHookPointsIntegration:
             assert kwargs["loss_amount_pkr"] == 15000.0
 
     def test_paper_broker_level_hit_hook(self) -> None:
-        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0)
+        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=False)
         broker = PaperBroker(ledger=ledger, persist_to_db=True)
         sig = TradeSignal(
             signal_id="SIG_EXIT_TEST",
