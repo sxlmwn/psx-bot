@@ -43,7 +43,7 @@ class TestCrashRecoveryAndPersistence:
             "loss_amount": 11000.0,
             "loss_pct": 2.2,
         }]
-        mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=mock_data)
+        mock_client.table.return_value.select.return_value.execute.return_value = MagicMock(data=mock_data)
         
         with patch('veterandesk.database.session.db_manager') as mock_db_manager:
             mock_db_manager.get_client.return_value = mock_client
@@ -100,7 +100,7 @@ class TestCrashRecoveryAndPersistence:
             "is_halted": True,
             "reason": "Daily loss limit breached",
         }]
-        mock_client_halted.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=mock_data_halted)
+        mock_client_halted.table.return_value.select.return_value.execute.return_value = MagicMock(data=mock_data_halted)
         
         with patch('veterandesk.database.session.db_manager') as mock_db_manager:
             mock_db_manager.get_client.return_value = mock_client_halted
@@ -108,7 +108,7 @@ class TestCrashRecoveryAndPersistence:
         
         # Test 2: Check next day returns False (no halt record)
         mock_client_next = MagicMock()
-        mock_client_next.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+        mock_client_next.table.return_value.select.return_value.execute.return_value = MagicMock(data=[])
         
         with patch('veterandesk.database.session.db_manager') as mock_db_manager:
             mock_db_manager.get_client.return_value = mock_client_next
@@ -152,7 +152,7 @@ class TestCrashRecoveryAndPersistence:
         """
         Verify that executing the same signal twice does not double-fill or duplicate.
         """
-        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0)
+        ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=False)
         broker = PaperBroker(ledger=ledger, persist_to_db=False)
 
         sig = TradeSignal(
@@ -363,7 +363,7 @@ class TestCrashRecoveryAndPersistence:
                 "created_at": "2026-09-16T14:00:00+00:00"
             }
         ]
-        mock_client.table.return_value.select.return_value.order.return_value.execute.return_value = MagicMock(data=mock_ledger_data)
+        mock_client.table.return_value.select.return_value.execute.return_value = MagicMock(data=mock_ledger_data)
         
         with patch('veterandesk.database.session.db_manager') as mock_db_manager:
             mock_db_manager.get_client.return_value = mock_client
@@ -385,7 +385,7 @@ class TestCrashRecoveryAndPersistence:
         Verify ledger starts with fresh state when DB is empty (first run).
         """
         mock_client = MagicMock()
-        mock_client.table.return_value.select.return_value.order.return_value.execute.return_value = MagicMock(data=[])
+        mock_client.table.return_value.select.return_value.execute.return_value = MagicMock(data=[])
         
         with patch('veterandesk.database.session.db_manager') as mock_db_manager:
             mock_db_manager.get_client.return_value = mock_client
@@ -398,6 +398,80 @@ class TestCrashRecoveryAndPersistence:
             assert ledger.equity_holdings_value == 0.0
             assert ledger.realized_pnl == 0.0
             assert len(ledger.entries) == 0
+
+    def test_ledger_load_failure_raises_error_loudly(self) -> None:
+        """
+        Verify that genuine DB connection failures raise loud errors instead of 
+        silently defaulting to starting balance (the dangerous behavior we just fixed).
+        """
+        mock_client = MagicMock()
+        # Simulate a genuine DB connection failure
+        mock_client.table.side_effect = Exception("Connection timeout to Supabase")
+        
+        with patch('veterandesk.database.session.db_manager') as mock_db_manager:
+            mock_db_manager.get_client.return_value = mock_client
+            
+            # Creating ledger with load_from_db=True should now raise an error
+            with pytest.raises(RuntimeError) as exc_info:
+                ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=True)
+            
+            # Verify the error message is clear and indicates the root cause
+            assert "CRITICAL" in str(exc_info.value)
+            assert "Failed to load ledger state from database" in str(exc_info.value)
+            assert "Connection timeout to Supabase" in str(exc_info.value)
+
+    def test_ledger_load_with_malformed_data_skips_bad_entries(self) -> None:
+        """
+        Verify ledger load gracefully handles malformed individual entries 
+        without failing the entire load process.
+        """
+        mock_client = MagicMock()
+        mock_ledger_data = [
+            {
+                "id": "entry1",
+                "transaction_id": "TX_BUY_TRD1",
+                "trade_id": "TRD1",
+                "account_name": "CASH",
+                "debit": 0.0,
+                "credit": 50000.0,
+                "balance_after": 450000.0,
+                "description": "BUY 500 OGDC @ 100.00",
+                "created_at": "2026-09-16T10:00:00+00:00"
+            },
+            {
+                # This entry has missing required fields and should be skipped
+                "id": "bad_entry",
+                "transaction_id": "TX_BAD",
+                # Missing account_name, should be skipped
+                "debit": 0.0,
+                "credit": 10000.0,
+                "balance_after": 440000.0,
+                "description": "Bad entry",
+                "created_at": "2026-09-16T11:00:00+00:00"
+            },
+            {
+                "id": "entry2",
+                "transaction_id": "TX_BUY_TRD2",
+                "trade_id": "TRD2",
+                "account_name": "CASH",
+                "debit": 0.0,
+                "credit": 30000.0,
+                "balance_after": 420000.0,
+                "description": "BUY 300 PPL @ 100.00",
+                "created_at": "2026-09-16T12:00:00+00:00"
+            }
+        ]
+        mock_client.table.return_value.select.return_value.execute.return_value = MagicMock(data=mock_ledger_data)
+        
+        with patch('veterandesk.database.session.db_manager') as mock_db_manager:
+            mock_db_manager.get_client.return_value = mock_client
+            
+            # Create ledger with load_from_db=True
+            ledger = DoubleEntryLedger(starting_balance_pkr=500000.0, load_from_db=True)
+            
+            # Should load only the valid entries, skipping the bad one
+            assert ledger.cash_balance == 420000.0  # 500000 - 50000 - 30000
+            assert len(ledger.entries) == 2  # Only 2 valid entries loaded
 
     def test_daily_brief_deduplication_prevents_race_condition(self) -> None:
         """
@@ -417,6 +491,9 @@ class TestCrashRecoveryAndPersistence:
             # First caller reserves slot successfully
             first_reservation = _try_reserve_daily_brief_slot("2026-09-17")
             assert first_reservation is True
+            
+            # Reset mock for second call
+            mock_client.reset_mock()
             
             # Second caller should fail to reserve (slot already taken)
             # Simulate database constraint violation
@@ -442,6 +519,9 @@ class TestCrashRecoveryAndPersistence:
             # First caller reserves slot successfully
             first_reservation = _try_reserve_session_summary_slot("2026-09-17")
             assert first_reservation is True
+            
+            # Reset mock for second call
+            mock_client.reset_mock()
             
             # Second caller should fail to reserve (slot already taken)
             mock_client.table.return_value.insert.side_effect = Exception("duplicate key value violates unique constraint")
