@@ -49,7 +49,7 @@ class DoubleEntryLedger:
     In-memory / persistent double-entry bookkeeping ledger.
     """
 
-    def __init__(self, starting_balance_pkr: float = 500000.0) -> None:
+    def __init__(self, starting_balance_pkr: float = 500000.0, load_from_db: bool = True) -> None:
         self.starting_balance: float = starting_balance_pkr
         self.entries: List[LedgerEntry] = []
         self._account_balances: Dict[AccountType, float] = {
@@ -59,6 +59,94 @@ class DoubleEntryLedger:
             AccountType.TAX_EXPENSE: 0.0,
             AccountType.REALIZED_PNL: 0.0,
         }
+        
+        if load_from_db:
+            self._load_state_from_db()
+
+    def _load_state_from_db(self) -> None:
+        """
+        Load ledger entries from Supabase demo_ledger table and reconstruct account balances.
+        This ensures ledger state persists across worker restarts.
+        """
+        try:
+            from veterandesk.database.session import db_manager
+            client = db_manager.get_client()
+            
+            # Fetch all ledger entries ordered by creation time
+            res = client.table("demo_ledger").select("*").order("created_at", desc=True).execute()
+            
+            if not res.data or len(res.data) == 0:
+                logger.info("ledger_db_empty_starting_fresh", starting_balance=self.starting_balance)
+                return
+            
+            # Reconstruct ledger state from database entries
+            loaded_entries: List[LedgerEntry] = []
+            reconstructed_balances: Dict[AccountType, float] = {
+                AccountType.CASH: self.starting_balance,
+                AccountType.EQUITY_HOLDINGS: 0.0,
+                AccountType.COMMISSION_EXPENSE: 0.0,
+                AccountType.TAX_EXPENSE: 0.0,
+                AccountType.REALIZED_PNL: 0.0,
+            }
+            
+            # Sort entries by creation time to ensure correct order
+            sorted_entries = sorted(res.data, key=lambda x: x.get("created_at", ""))
+            
+            for row in sorted_entries:
+                try:
+                    account_str = row.get("account_name")
+                    if not account_str:
+                        continue
+                    
+                    try:
+                        account = AccountType(account_str)
+                    except ValueError:
+                        logger.warning("ledger_db_unknown_account_type", account_type=account_str)
+                        continue
+                    
+                    debit = float(row.get("debit", 0.0))
+                    credit = float(row.get("credit", 0.0))
+                    balance_after = float(row.get("balance_after", 0.0))
+                    
+                    # Reconstruct entry
+                    entry = LedgerEntry(
+                        id=row.get("id", ""),
+                        transaction_id=row.get("transaction_id", ""),
+                        trade_id=row.get("trade_id"),
+                        account=account,
+                        debit=debit,
+                        credit=credit,
+                        balance_after=balance_after,
+                        description=row.get("description", ""),
+                        created_at=datetime.fromisoformat(row.get("created_at", "").replace("Z", "+00:00"))
+                    )
+                    loaded_entries.append(entry)
+                    
+                    # Reconstruct account balance
+                    if account in (AccountType.CASH, AccountType.EQUITY_HOLDINGS, AccountType.COMMISSION_EXPENSE, AccountType.TAX_EXPENSE):
+                        reconstructed_balances[account] += (debit - credit)
+                    elif account == AccountType.REALIZED_PNL:
+                        reconstructed_balances[account] += (credit - debit)
+                        
+                except Exception as e:
+                    logger.warning("ledger_db_entry_reconstruction_failed", entry_id=row.get("id"), error=str(e))
+                    continue
+            
+            # Update ledger state with reconstructed data
+            self.entries = loaded_entries
+            self._account_balances = reconstructed_balances
+            
+            logger.info(
+                "ledger_state_loaded_from_db",
+                entries_count=len(loaded_entries),
+                cash_balance=reconstructed_balances[AccountType.CASH],
+                equity_holdings=reconstructed_balances[AccountType.EQUITY_HOLDINGS],
+                realized_pnl=reconstructed_balances[AccountType.REALIZED_PNL]
+            )
+            
+        except Exception as e:
+            logger.warning("ledger_db_load_failed", error=str(e))
+            # Continue with fresh state if DB load fails
 
     @property
     def cash_balance(self) -> float:

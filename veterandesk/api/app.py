@@ -43,7 +43,7 @@ app = FastAPI(
     description="Deterministic trading, risk discipline, and paper ledger execution for PSX equities."
 )
 
-ledger = DoubleEntryLedger(starting_balance_pkr=settings.starting_balance_pkr)
+ledger = DoubleEntryLedger(starting_balance_pkr=settings.starting_balance_pkr, load_from_db=True)
 broker = PaperBroker(ledger=ledger)
 portfolio_mgr = PortfolioManager()
 lessons_mem = LessonsMemory()
