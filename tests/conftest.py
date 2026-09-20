@@ -3,13 +3,13 @@ Pytest configuration and fixtures for tests.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 from veterandesk.config import settings
 
 
 @pytest.fixture
-def deterministic_llm():
+def deterministic_llm() -> None:
     """
     Force deterministic LLM fallback for post-mortem tests.
     
@@ -24,7 +24,7 @@ def deterministic_llm():
 
 
 @pytest.fixture(autouse=True)
-def mock_database_persistence():
+def mock_database_persistence() -> None:
     """
     Mock database persistence to avoid foreign key constraint violations in tests.
     
@@ -40,3 +40,6 @@ def mock_database_persistence():
         mock_table.insert.return_value.execute.return_value = None
         mock_db_mgr.get_client.return_value = mock_client
         yield
+
+
+

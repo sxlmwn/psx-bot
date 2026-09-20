@@ -44,16 +44,17 @@ app = FastAPI(
 )
 
 ledger = DoubleEntryLedger(starting_balance_pkr=settings.starting_balance_pkr, load_from_db=True)
-broker = PaperBroker(ledger=ledger)
-portfolio_mgr = PortfolioManager()
 lessons_mem = LessonsMemory()
-post_mortem_engine = PostMortemEngine(lessons_memory=lessons_mem)
+post_mortem_engine = PostMortemEngine(lessons_memory=lessons_mem, persist_to_db=True, enable_recovery=True)
+broker = PaperBroker(ledger=ledger, post_mortem_engine=post_mortem_engine)
+portfolio_mgr = PortfolioManager()
 health_monitor = SystemHealthMonitor(ledger=ledger)
 alert_scheduler = create_alert_scheduler(start=False)
 
 
 @app.on_event("startup")
 def on_startup() -> None:
+    # Start alert scheduler
     try:
         from apscheduler.triggers.interval import IntervalTrigger
         alert_scheduler.add_job(
@@ -66,7 +67,21 @@ def on_startup() -> None:
         alert_scheduler.start()
         logger.info("telegram_alert_scheduler_started")
     except Exception as ex:
-        logger.warning("scheduler_startup_error", error=str(ex))
+        logger.error("scheduler_startup_failed", error=str(ex), error_type=type(ex).__name__)
+    
+    # Start post-mortem engine in background thread (no blocking startup)
+    try:
+        import threading
+        def startup_post_mortem() -> None:
+            try:
+                post_mortem_engine.startup()
+                logger.info("post_mortem_engine_startup_complete")
+            except Exception as e:
+                logger.error("post_mortem_engine_startup_failed", error=str(e), error_type=type(e).__name__)
+        startup_thread = threading.Thread(target=startup_post_mortem, daemon=True)
+        startup_thread.start()
+    except Exception as ex:
+        logger.error("post_mortem_thread_startup_failed", error=str(ex), error_type=type(ex).__name__)
 
 
 @app.on_event("shutdown")

@@ -151,6 +151,8 @@ if journal_records:
             "Trade ID": r.get("trade_id"),
             "Verdict": r.get("verdict"),
             "Status": r.get("post_mortem_status"),
+            "Generation Source": r.get("generation_source") or "Unknown",
+            "Model Used": r.get("model_used") or "N/A",
             "Entry Rationale": r.get("entry_rationale"),
             "Exit Rationale": r.get("exit_rationale"),
             "Post-Mortem Analysis": r.get("post_mortem_analysis"),

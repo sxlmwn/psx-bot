@@ -72,9 +72,10 @@ class TradingEngine:
         broker: Optional[PaperBroker] = None,
         risk_engine: Optional[RiskEngine] = None,
         scraper: Optional[PSXDpsScraper] = None,
+        post_mortem_engine: Optional[Any] = None,
     ) -> None:
         self.ledger = ledger or DoubleEntryLedger(starting_balance_pkr=settings.starting_balance_pkr, load_from_db=True)
-        self.broker = broker or PaperBroker(ledger=self.ledger)
+        self.broker = broker or PaperBroker(ledger=self.ledger, post_mortem_engine=post_mortem_engine)
         self.risk_engine = risk_engine or RiskEngine(
             max_risk_per_trade_pct=settings.max_risk_per_trade_pct,
             max_daily_loss_pct=settings.max_daily_loss_pct,

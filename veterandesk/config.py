@@ -164,7 +164,7 @@ class Settings(BaseSettings):
     # Reasoning / Post-Mortem (Groq API)
     groq_api_key: Optional[str] = Field(default=None, alias="GROQ_API_KEY")
     groq_model: str = "openai/gpt-oss-120b"
-    groq_fallback_model: str = "qwen/qwen3.6-27b"
+    groq_fallback_model: str = "qwen/qwen3.8-27b"
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
     anthropic_model: str = "claude-3-7-sonnet-20250219"
     use_mock_llm_if_no_key: bool = False

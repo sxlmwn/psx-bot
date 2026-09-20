@@ -37,7 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import uvicorn
-from veterandesk.api.app import app, broker, ledger, risk_engine
+from veterandesk.api.app import app, broker, ledger, risk_engine, post_mortem_engine
 from veterandesk.config import settings
 from veterandesk.logging import get_logger
 from veterandesk.trading_engine import TradingEngine, is_psx_market_open
@@ -68,6 +68,7 @@ def main() -> None:
         ledger=ledger,
         broker=broker,
         risk_engine=risk_engine,
+        post_mortem_engine=post_mortem_engine,
     )
 
     if args.once:
@@ -88,6 +89,7 @@ def main() -> None:
 
     if args.no_server:
         logger.info("running_in_pure_worker_mode_no_http_server")
+        logger.warning("post_mortem_queue_not_processed_no_http_server", msg="Post-mortem queue processing (every 2 minutes) requires the FastAPI server to be running. In --no-server mode, pending journal entries will not be processed.")
         try:
             while True:
                 import time

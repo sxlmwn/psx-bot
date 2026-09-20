@@ -21,8 +21,27 @@ from veterandesk.config import fee_structure, settings
 from veterandesk.execution.ledger import AccountType, DoubleEntryLedger
 from veterandesk.logging import get_logger
 from veterandesk.strategy.models import SignalAction, TradeSignal
+from typing import TYPE_CHECKING
+import sys
+import os
+
+if TYPE_CHECKING:
+    from veterandesk.journal.post_mortem import PostMortemEngine
 
 logger = get_logger("veterandesk.paper_broker")
+
+
+def _is_test_environment() -> bool:
+    """
+    Check if running in test environment (pytest).
+    
+    ONLY blocks writes when pytest is actually running.
+    Does NOT silently disable production if ENVIRONMENT is unset or different.
+    """
+    return (
+        "pytest" in sys.modules or
+        os.environ.get("PYTEST_CURRENT_TEST") is not None
+    )
 
 
 class TradeStatus(str, Enum):
@@ -66,6 +85,7 @@ class DemoTrade:
     is_valid_signal: bool = True
     data_quality_flag: str = "VALID"
     invalidation_reason: Optional[str] = None
+    approximated_fields: Optional[List[str]] = None  # Fields that were approximated during backfill
 
     def __post_init__(self) -> None:
         # Non-negotiable: Stop loss cannot be None or invalid
@@ -113,10 +133,12 @@ class PaperBroker:
         ledger: DoubleEntryLedger,
         slippage_pct: Optional[float] = None,
         persist_to_db: bool = True,
+        post_mortem_engine: Optional["PostMortemEngine"] = None,
     ) -> None:
         self.ledger: DoubleEntryLedger = ledger
         self.slippage_pct: float = slippage_pct or fee_structure.default_slippage_pct
         self.persist_to_db: bool = persist_to_db
+        self.post_mortem_engine: Optional["PostMortemEngine"] = post_mortem_engine
         self.open_trades: Dict[str, DemoTrade] = {}
         self.closed_trades: List[DemoTrade] = []
 
@@ -388,6 +410,27 @@ class PaperBroker:
         self._persist_trade_to_db(trade)
         self._persist_ledger_entries_to_db(entries)
 
+        # Queue trade for post-mortem analysis (non-blocking, after trade is fully persisted)
+        # Use injected engine if available, otherwise fall back to global instance
+        if self.post_mortem_engine or self.persist_to_db:
+            try:
+                engine = self.post_mortem_engine
+                if engine is None:
+                    from veterandesk.api.app import post_mortem_engine as global_engine
+                    engine = global_engine
+                engine.queue_trade_for_post_mortem(trade)
+                logger.info("post_mortem_queued_after_exit", trade_id=trade.trade_id, ticker=trade.ticker, exit_reason=exit_reason.value)
+            except Exception as ex:
+                logger.error("post_mortem_queueing_failed_critical", trade_id=trade.trade_id, error=str(ex), error_type=type(ex).__name__)
+                # Send alert for failed post-mortem queueing
+                try:
+                    from veterandesk.alerts.telegram import telegram_service
+                    telegram_service.send_message(
+                        f"⚠️ Post-Mortem Queueing Failed: Failed to queue trade {trade.trade_id} ({trade.ticker}) for post-mortem analysis. Error: {str(ex)}"
+                    )
+                except Exception as alert_ex:
+                    logger.warning("post_mortem_queueing_alert_failed", error=str(alert_ex))
+
         if self.persist_to_db:
             # Telegram alert on level hit / position closed
             try:
@@ -440,7 +483,26 @@ class PaperBroker:
 
     def _persist_ledger_entries_to_db(self, entries: List[Any]) -> None:
         """Persist double-entry ledger records to Supabase PostgreSQL."""
+        # Hard safety guard: no DB writes in test environments
+        if _is_test_environment():
+            logger.warning("ledger_persistence_blocked_test_environment", count=len(entries))
+            return
+            
         if not self.persist_to_db:
+            # Safety check: if we're about to skip a write outside of pytest, alert loudly
+            if not _is_test_environment():
+                logger.error(
+                    "ledger_persistence_disabled_in_production",
+                    count=len(entries),
+                    warning="DB writes are disabled (persist_to_db=False) outside of test environment. This may be a configuration error."
+                )
+                try:
+                    from veterandesk.alerts.telegram import telegram_service
+                    telegram_service.send_message(
+                        f"⚠️ Ledger Persistence Disabled: DB writes are disabled (persist_to_db=False) for {len(entries)} ledger entries outside of test environment. Check configuration."
+                    )
+                except Exception as alert_ex:
+                    logger.warning("ledger_persistence_disabled_alert_failed", error=str(alert_ex))
             return
         try:
             from veterandesk.database.session import db_manager
@@ -465,7 +527,26 @@ class PaperBroker:
 
     def _persist_trade_to_db(self, trade: DemoTrade) -> None:
         """Persist trade record to Supabase PostgreSQL database."""
+        # Hard safety guard: no DB writes in test environments
+        if _is_test_environment():
+            logger.warning("trade_persistence_blocked_test_environment", trade_id=trade.trade_id)
+            return
+            
         if not self.persist_to_db:
+            # Safety check: if we're about to skip a write outside of pytest, alert loudly
+            if not _is_test_environment():
+                logger.error(
+                    "trade_persistence_disabled_in_production",
+                    trade_id=trade.trade_id,
+                    warning="DB writes are disabled (persist_to_db=False) outside of test environment. This may be a configuration error."
+                )
+                try:
+                    from veterandesk.alerts.telegram import telegram_service
+                    telegram_service.send_message(
+                        f"⚠️ Trade Persistence Disabled: DB writes are disabled (persist_to_db=False) for trade {trade.trade_id} ({trade.ticker}) outside of test environment. Check configuration."
+                    )
+                except Exception as alert_ex:
+                    logger.warning("trade_persistence_disabled_alert_failed", error=str(alert_ex))
             return
         try:
             from veterandesk.database.session import db_manager

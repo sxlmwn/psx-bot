@@ -14,8 +14,26 @@ from veterandesk.alerts.discord import discord_service
 from veterandesk.alerts.telegram import telegram_service
 from veterandesk.config import PKT_TZ, settings
 from veterandesk.logging import get_logger
+from apscheduler.triggers.interval import IntervalTrigger
 
 logger = get_logger("veterandesk.scheduler")
+
+
+def process_post_mortem_queue_job() -> None:
+    """
+    Process pending post-mortem queue for closed trades.
+    Runs every 2 minutes to generate LLM post-mortem analysis.
+    This is non-blocking and runs in the background.
+    Note: APScheduler BackgroundScheduler runs in a separate thread, so asyncio.run() is safe.
+    """
+    import asyncio
+    try:
+        from veterandesk.api.app import post_mortem_engine
+        processed = asyncio.run(post_mortem_engine.process_pending_queue())
+        if processed > 0:
+            logger.info("post_mortem_queue_processed", count=processed)
+    except Exception as e:
+        logger.error("post_mortem_queue_job_failed", error=str(e), error_type=type(e).__name__)
 
 
 def _check_already_sent_today(message_type: str, date_str: str) -> bool:
@@ -531,6 +549,7 @@ def create_alert_scheduler(
     Configure APScheduler with:
     1. Daily Brief: 9:15 AM PKT
     2. Session Summary: 3:45 PM PKT
+    3. Post-Mortem Queue Processing: Every 2 minutes
     
     Uses persistent SQLAlchemy job store to survive process restarts.
     Jobs configured with 5-minute misfire_grace_time to handle brief restart delays.
@@ -574,6 +593,17 @@ def create_alert_scheduler(
         name="Session Summary (3:45 PM PKT)",
         replace_existing=True,
         misfire_grace_time=300,  # 5 minutes
+    )
+
+    # 3. Post-Mortem Queue Processing: Every 2 minutes
+    # This processes pending journal entries and calls Groq for analysis
+    scheduler.add_job(
+        process_post_mortem_queue_job,
+        trigger=IntervalTrigger(minutes=2),
+        id="post_mortem_queue",
+        name="Post-Mortem Queue Processing (Every 2 minutes)",
+        replace_existing=True,
+        misfire_grace_time=60,  # 1 minute
     )
 
     if start:
