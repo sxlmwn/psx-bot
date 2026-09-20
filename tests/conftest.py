@@ -6,6 +6,8 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from veterandesk.config import settings
+from veterandesk.alerts.telegram import telegram_service
+from veterandesk.alerts.discord import discord_service
 
 
 @pytest.fixture
@@ -50,7 +52,10 @@ def disable_real_network_requests() -> None:
     This prevents tests from making real network requests even if mocks fail to apply,
     ensuring test isolation and preventing side effects.
     
-    Patches both settings and get_secret to block environment variable reads.
+    Patches settings and get_secret to block environment variable reads, AND patches
+    the already-instantiated telegram_service/discord_service singletons directly —
+    those singletons freeze their .enabled flag at import time (before this fixture
+    ever runs), so patching settings alone does not affect them.
     """
     def mock_get_secret(key: str, default: str = None) -> str:
         """Mock get_secret to always return the default, blocking environment reads."""
@@ -59,8 +64,7 @@ def disable_real_network_requests() -> None:
     with patch.object(settings, 'telegram_enabled', False), \
          patch.object(settings, 'discord_enabled', False), \
          patch.object(settings, 'groq_api_key', None), \
-         patch('veterandesk.config.get_secret', side_effect=mock_get_secret):
+         patch('veterandesk.config.get_secret', side_effect=mock_get_secret), \
+         patch.object(telegram_service, 'enabled', False), \
+         patch.object(discord_service, 'enabled', False):
         yield
-
-
-
