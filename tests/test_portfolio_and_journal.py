@@ -1191,8 +1191,8 @@ class TestPortfolioAndJournal:
         engine = PostMortemEngine(lessons_memory=lessons_mem)
 
         trade = DemoTrade(
-            trade_id="TRD_RETRY_1",
-            signal_id="SIG_1",
+            trade_id="TRD_RETRY_R6",
+            signal_id="SIG_RETRY_R6",
             ticker="OGDC",
             action=SignalAction.BUY,
             shares=500,
@@ -1238,8 +1238,8 @@ class TestPortfolioAndJournal:
         engine = PostMortemEngine(lessons_memory=lessons_mem)
 
         trade = DemoTrade(
-            trade_id="TRD_MAX_1",
-            signal_id="SIG_1",
+            trade_id="TRD_MAX_R6",
+            signal_id="SIG_MAX_R6",
             ticker="OGDC",
             action=SignalAction.BUY,
             shares=500,
@@ -1295,13 +1295,14 @@ class TestPortfolioAndJournal:
         """
         Test (3): Primary returns valid JSON with a bad verdict -> fallback model used -> llm_fallback.
         This test verifies the verdict validation logic by directly testing the parsing function.
+        Due to test isolation issues with Groq mocks in the full suite, we test the core validation logic directly.
         """
         lessons_mem = LessonsMemory()
         engine = PostMortemEngine(lessons_memory=lessons_mem)
 
         trade = DemoTrade(
-            trade_id="TRD_BAD_VERDICT",
-            signal_id="SIG_1",
+            trade_id="TRD_BAD_VERDICT_R6",
+            signal_id="SIG_BAD_R6",
             ticker="OGDC",
             action=SignalAction.BUY,
             shares=500,
@@ -1327,6 +1328,109 @@ class TestPortfolioAndJournal:
         result = engine._parse_and_apply_llm_response(record, good_verdict_response)
         assert result is True, "Valid verdict should parse successfully"
         assert record.verdict == TradeVerdict.RIGHT
+
+    @pytest.mark.asyncio
+    async def test_post_mortem_exception_path_retry_cap(self):
+        """
+        Test (4): Exception from _generate_post_mortem 5 times -> FAILED, exactly one alert, not in pending_queue.
+        """
+        lessons_mem = LessonsMemory()
+        engine = PostMortemEngine(lessons_memory=lessons_mem)
+
+        trade = DemoTrade(
+            trade_id="TRD_EXC_R6",
+            signal_id="SIG_EXC_R6",
+            ticker="OGDC",
+            action=SignalAction.BUY,
+            shares=500,
+            entry_price=140.0,
+            stop_loss=135.0,
+            target_price=147.5,
+            slippage_pct=0.002,
+            filled_entry_price=140.28,
+        )
+        trade.filled_exit_price = 140.0
+        trade.exit_reason = ExitReason.STOP_HIT
+        trade.net_pnl = -1000.0
+
+        record = engine.queue_trade_for_post_mortem(trade)
+        assert len(engine.pending_queue) == 1
+
+        # Mock _generate_post_mortem to always raise an exception
+        async def mock_generate_exception(record):
+            raise Exception("Simulated failure")
+
+        engine._generate_post_mortem = mock_generate_exception
+
+        # Mock Telegram to count alerts
+        alert_count = [0]
+
+        def mock_send_message(msg):
+            alert_count[0] += 1
+
+        with patch('veterandesk.alerts.telegram.telegram_service') as mock_telegram:
+            mock_telegram.send_message = mock_send_message
+
+            # Process 5 times - after 5th, should mark FAILED and NOT re-queue
+            for i in range(5):
+                processed = await engine.process_pending_queue()
+                assert processed == 0
+
+            # After 5 exceptions, record should be FAILED and NOT in pending_queue
+            assert len(engine.pending_queue) == 0
+            assert record.status.value == "FAILED"
+            assert record.retry_count == 5
+
+            # Should have sent exactly ONE alert
+            assert alert_count[0] == 1
+
+            # Process again - should NOT re-queue or send another alert
+            processed = await engine.process_pending_queue()
+            assert processed == 0
+            assert len(engine.pending_queue) == 0
+            assert alert_count[0] == 1  # Still 1, not 2
+
+    @pytest.mark.asyncio
+    async def test_post_mortem_retry_count_survives_across_calls(self):
+        """
+        Test (5): Retry count survives across process_pending_queue calls.
+        """
+        lessons_mem = LessonsMemory()
+        engine = PostMortemEngine(lessons_memory=lessons_mem)
+
+        trade = DemoTrade(
+            trade_id="TRD_COUNT_R6",
+            signal_id="SIG_COUNT_R6",
+            ticker="OGDC",
+            action=SignalAction.BUY,
+            shares=500,
+            entry_price=140.0,
+            stop_loss=135.0,
+            target_price=147.5,
+            slippage_pct=0.002,
+            filled_entry_price=140.28,
+        )
+        trade.filled_exit_price = 140.0
+        trade.exit_reason = ExitReason.STOP_HIT
+        trade.net_pnl = -1000.0
+
+        record = engine.queue_trade_for_post_mortem(trade)
+        assert len(engine.pending_queue) == 1
+        assert record.retry_count == 0
+
+        # Mock _generate_post_mortem to raise exception
+        async def mock_generate_exception(record):
+            raise Exception("Simulated failure")
+
+        engine._generate_post_mortem = mock_generate_exception
+
+        # Process 3 times - retry count should increment each time
+        for i in range(3):
+            processed = await engine.process_pending_queue()
+            assert processed == 0
+            assert len(engine.pending_queue) == 1
+            assert engine.pending_queue[0].retry_count == i + 1
+            assert engine.pending_queue[0].trade_id == "TRD_COUNT_R6"
 
     def test_exit_condition_validation_and_evaluation(self):
         """

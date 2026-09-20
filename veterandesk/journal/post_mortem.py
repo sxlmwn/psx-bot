@@ -338,29 +338,14 @@ class PostMortemEngine:
                     self._persist_journal_record(record)
                     processed += 1
                 else:
+                    # Handle failure with retry cap
                     record.retry_count += 1
-                    if record.retry_count >= 5:
-                        record.status = PostMortemStatus.FAILED
-                        logger.error("post_mortem_max_retries_exceeded", trade_id=record.trade_id)
-                        # Send alert for failed post-mortem (once, then do NOT re-queue)
-                        try:
-                            from veterandesk.alerts.telegram import telegram_service
-                            telegram_service.send_message(
-                                f"⚠️ Post-Mortem Failed: Trade {record.trade_id} ({record.ticker}) failed post-mortem after 5 retries."
-                            )
-                        except Exception as alert_ex:
-                            logger.warning("post_mortem_failed_alert_failed", error=str(alert_ex))
-                        self._persist_journal_record(record)
-                        # FAILED records are persisted but NOT re-queued
-                    else:
-                        # retry_count < 5: re-queue for retry
-                        self._persist_journal_record(record)
-                        remaining.append(record)
+                    self._handle_retry_failure(record, remaining)
             except Exception as e:
+                # Handle exception with retry cap
                 record.retry_count += 1
                 logger.error("post_mortem_error", trade_id=record.trade_id, error=str(e))
-                self._persist_journal_record(record)
-                remaining.append(record)
+                self._handle_retry_failure(record, remaining)
 
         # Add remaining back to queue and clear in-flight with lock
         with self._queue_lock:
@@ -370,6 +355,29 @@ class PostMortemEngine:
                 self._in_flight.pop(record.trade_id, None)
         
         return processed
+
+    def _handle_retry_failure(self, record: JournalRecord, remaining: List[JournalRecord]) -> None:
+        """
+        Shared retry logic for both explicit failures and exceptions.
+        Applies retry cap: >=5 -> FAILED (persisted once, ONE alert, not re-queued); <5 -> re-queued.
+        """
+        if record.retry_count >= 5:
+            record.status = PostMortemStatus.FAILED
+            logger.error("post_mortem_max_retries_exceeded", trade_id=record.trade_id)
+            # Send alert for failed post-mortem (once, then do NOT re-queue)
+            try:
+                from veterandesk.alerts.telegram import telegram_service
+                telegram_service.send_message(
+                    f"⚠️ Post-Mortem Failed: Trade {record.trade_id} ({record.ticker}) failed post-mortem after 5 retries."
+                )
+            except Exception as alert_ex:
+                logger.warning("post_mortem_failed_alert_failed", error=str(alert_ex))
+            self._persist_journal_record(record)
+            # FAILED records are persisted but NOT re-queued
+        else:
+            # retry_count < 5: re-queue for retry
+            self._persist_journal_record(record)
+            remaining.append(record)
 
     def _persist_journal_record(self, record: JournalRecord) -> None:
         """Persist trade journal and verdict to live Supabase PostgreSQL."""
