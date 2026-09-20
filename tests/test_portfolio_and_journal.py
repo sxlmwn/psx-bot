@@ -1138,49 +1138,64 @@ class TestPortfolioAndJournal:
         import sys
         from unittest.mock import patch, MagicMock, call
         
-        # Remove ALL veterandesk modules to test fresh import
-        modules_to_remove = [k for k in sys.modules.keys() if k.startswith('veterandesk')]
-        for mod in modules_to_remove:
-            del sys.modules[mod]
+        # Snapshot existing veterandesk modules to restore them after test
+        original_modules = {k: v for k, v in sys.modules.items() if k.startswith('veterandesk')}
         
-        # Mock the ledger's _load_state_from_db to prevent actual DB calls
-        with patch('veterandesk.execution.ledger.DoubleEntryLedger._load_state_from_db') as mock_load:
-            # Mock DB client to track any write operations
-            mock_client = MagicMock()
-            mock_table = MagicMock()
-            mock_client.table.return_value = mock_table
+        try:
+            # Remove ALL veterandesk modules to test fresh import
+            modules_to_remove = [k for k in sys.modules.keys() if k.startswith('veterandesk')]
+            for mod in modules_to_remove:
+                del sys.modules[mod]
             
-            with patch('veterandesk.database.session.db_manager.get_client', return_value=mock_client):
-                # Mock PostMortemEngine methods to track buggy calls
-                with patch('veterandesk.journal.post_mortem.PostMortemEngine._recover_pending_from_db') as mock_recover:
-                    with patch('veterandesk.journal.post_mortem.PostMortemEngine.startup') as mock_startup:
-                        # Mock alert scheduler to track start calls
-                        mock_scheduler = MagicMock()
-                        with patch('veterandesk.alerts.scheduler.create_alert_scheduler', return_value=mock_scheduler):
-                            # Import app module - this should trigger the mocked load, not a real DB call
-                            import veterandesk.api.app as app_module
-                            
-                            # Verify that _load_state_from_db was called (because load_from_db=True)
-                            assert mock_load.called, "Expected _load_state_from_db to be called during import"
-                            
-                            # Verify ledger was created by checking the actual module's namespace
-                            assert 'ledger' in dir(sys.modules['veterandesk.api.app'])
-                            assert sys.modules['veterandesk.api.app'].ledger is not None
-                            
-                            # CRITICAL: Verify NO DB recovery calls during import (buggy __init__ behavior)
-                            assert not mock_recover.called, "PostMortemEngine._recover_pending_from_db should NOT be called during import"
-                            
-                            # Verify startup was NOT called during import (only in FastAPI startup event)
-                            assert not mock_startup.called, "PostMortemEngine.startup should NOT be called during import"
-                            
-                            # Verify no write operations on DB client during import
-                            write_methods = ['insert', 'upsert', 'update', 'delete']
-                            for method in write_methods:
-                                assert not hasattr(mock_table, method) or not getattr(mock_table, method).called, \
-                                    f"DB client.{method} should NOT be called during import"
-                            
-                            # Verify scheduler was NOT started during import (only in FastAPI startup event)
-                            assert not mock_scheduler.start.called, "Alert scheduler should NOT be started during import"
+            # Mock the ledger's _load_state_from_db to prevent actual DB calls
+            with patch('veterandesk.execution.ledger.DoubleEntryLedger._load_state_from_db') as mock_load:
+                # Mock DB client to track any write operations
+                mock_client = MagicMock()
+                mock_table = MagicMock()
+                mock_client.table.return_value = mock_table
+                
+                with patch('veterandesk.database.session.db_manager.get_client', return_value=mock_client):
+                    # Mock PostMortemEngine methods to track buggy calls
+                    with patch('veterandesk.journal.post_mortem.PostMortemEngine._recover_pending_from_db') as mock_recover:
+                        with patch('veterandesk.journal.post_mortem.PostMortemEngine.startup') as mock_startup:
+                            # Mock alert scheduler to track start calls
+                            mock_scheduler = MagicMock()
+                            with patch('veterandesk.alerts.scheduler.create_alert_scheduler', return_value=mock_scheduler):
+                                # Import app module - this should trigger the mocked load, not a real DB call
+                                import veterandesk.api.app as app_module
+                                
+                                # Verify that _load_state_from_db was called (because load_from_db=True)
+                                assert mock_load.called, "Expected _load_state_from_db to be called during import"
+                                
+                                # Verify ledger was created by checking the actual module's namespace
+                                assert 'ledger' in dir(sys.modules['veterandesk.api.app'])
+                                assert sys.modules['veterandesk.api.app'].ledger is not None
+                                
+                                # CRITICAL: Verify NO DB recovery calls during import (buggy __init__ behavior)
+                                assert not mock_recover.called, "PostMortemEngine._recover_pending_from_db should NOT be called during import"
+                                
+                                # Verify startup was NOT called during import (only in FastAPI startup event)
+                                assert not mock_startup.called, "PostMortemEngine.startup should NOT be called during import"
+                                
+                                # Verify no write operations on DB client during import
+                                write_methods = ['insert', 'upsert', 'update', 'delete']
+                                for method in write_methods:
+                                    assert not hasattr(mock_table, method) or not getattr(mock_table, method).called, \
+                                        f"DB client.{method} should NOT be called during import"
+                                
+                                # Verify scheduler was NOT started during import (only in FastAPI startup event)
+                                assert not mock_scheduler.start.called, "Alert scheduler should NOT be started during import"
+        finally:
+            # Restore original veterandesk modules to prevent test pollution
+            # Remove any newly imported veterandesk modules
+            current_veterandesk_modules = [k for k in sys.modules.keys() if k.startswith('veterandesk')]
+            for mod in current_veterandesk_modules:
+                if mod not in original_modules:
+                    del sys.modules[mod]
+            
+            # Restore original modules
+            for mod_name, mod_obj in original_modules.items():
+                sys.modules[mod_name] = mod_obj
     
     @pytest.mark.asyncio
     async def test_post_mortem_queue_retry_logic(self):
@@ -1191,8 +1206,8 @@ class TestPortfolioAndJournal:
         engine = PostMortemEngine(lessons_memory=lessons_mem)
 
         trade = DemoTrade(
-            trade_id="TRD_RETRY_R6",
-            signal_id="SIG_RETRY_R6",
+            trade_id="TRD_RETRY_R7",
+            signal_id="SIG_RETRY_R7",
             ticker="OGDC",
             action=SignalAction.BUY,
             shares=500,
@@ -1238,8 +1253,8 @@ class TestPortfolioAndJournal:
         engine = PostMortemEngine(lessons_memory=lessons_mem)
 
         trade = DemoTrade(
-            trade_id="TRD_MAX_R6",
-            signal_id="SIG_MAX_R6",
+            trade_id="TRD_MAX_R7",
+            signal_id="SIG_MAX_R7",
             ticker="OGDC",
             action=SignalAction.BUY,
             shares=500,
@@ -1294,15 +1309,15 @@ class TestPortfolioAndJournal:
     async def test_post_mortem_invalid_verdict_triggers_fallback(self):
         """
         Test (3): Primary returns valid JSON with a bad verdict -> fallback model used -> llm_fallback.
-        This test verifies the verdict validation logic by directly testing the parsing function.
-        Due to test isolation issues with Groq mocks in the full suite, we test the core validation logic directly.
+        Integration test through engine.process_pending_queue() to prove the fallback logic works end-to-end.
         """
+        from veterandesk.config import settings
         lessons_mem = LessonsMemory()
         engine = PostMortemEngine(lessons_memory=lessons_mem)
 
         trade = DemoTrade(
-            trade_id="TRD_BAD_VERDICT_R6",
-            signal_id="SIG_BAD_R6",
+            trade_id="TRD_BAD_VERDICT_R7",
+            signal_id="SIG_BAD_R7",
             ticker="OGDC",
             action=SignalAction.BUY,
             shares=500,
@@ -1316,18 +1331,48 @@ class TestPortfolioAndJournal:
         trade.exit_reason = ExitReason.TARGET_HIT
         trade.net_pnl = 3500.0
 
-        record = engine.queue_trade_for_post_mortem(trade)
+        with patch('veterandesk.journal.post_mortem.get_secret') as mock_get_secret, \
+             patch('veterandesk.alerts.telegram.telegram_service.send_message'):
+            mock_get_secret.return_value = "test_key_r7"
 
-        # Test 1: Valid JSON with invalid verdict should return False (trigger fallback)
-        bad_verdict_response = '{"verdict": "InvalidVerdict", "analysis": "test", "transferable_lesson": "test"}'
-        result = engine._parse_and_apply_llm_response(record, bad_verdict_response)
-        assert result is False, "Invalid verdict should cause parsing to fail and trigger fallback"
+            with patch('veterandesk.journal.post_mortem.Groq') as mock_groq_class:
+                # Mock the Groq client
+                mock_client = MagicMock()
+                mock_groq_class.return_value = mock_client
 
-        # Test 2: Valid JSON with valid verdict should return True
-        good_verdict_response = '{"verdict": "Right", "analysis": "Good trade", "transferable_lesson": "Test lesson"}'
-        result = engine._parse_and_apply_llm_response(record, good_verdict_response)
-        assert result is True, "Valid verdict should parse successfully"
-        assert record.verdict == TradeVerdict.RIGHT
+                # First call (primary model): valid JSON but INVALID verdict
+                bad_response = MagicMock()
+                bad_response.choices = [MagicMock()]
+                bad_response.choices[0].message.content = '{"verdict": "InvalidVerdict", "analysis": "test", "transferable_lesson": "test"}'
+
+                # Second call (fallback model): valid JSON with valid verdict
+                good_response = MagicMock()
+                good_response.choices = [MagicMock()]
+                good_response.choices[0].message.content = '{"verdict": "Right", "analysis": "Good trade", "transferable_lesson": "Test lesson"}'
+
+                # Create returns a different response each time it's called
+                call_count = [0]
+                def create_side_effect(*args, **kwargs):
+                    call_count[0] += 1
+                    if call_count[0] == 1:
+                        return bad_response
+                    else:
+                        return good_response
+
+                mock_client.chat.completions.create.side_effect = create_side_effect
+
+                record = engine.queue_trade_for_post_mortem(trade)
+                assert len(engine.pending_queue) == 1
+
+                processed = await engine.process_pending_queue()
+                assert processed == 1
+                assert len(engine.pending_queue) == 0
+
+                completed = engine.completed_journal["TRD_BAD_VERDICT_R7"]
+                assert completed.verdict == TradeVerdict.RIGHT
+                assert completed.generation_source == "llm_fallback"
+                assert completed.model_used == settings.groq_fallback_model
+                assert mock_client.chat.completions.create.call_count == 2
 
     @pytest.mark.asyncio
     async def test_post_mortem_exception_path_retry_cap(self):
@@ -1338,8 +1383,8 @@ class TestPortfolioAndJournal:
         engine = PostMortemEngine(lessons_memory=lessons_mem)
 
         trade = DemoTrade(
-            trade_id="TRD_EXC_R6",
-            signal_id="SIG_EXC_R6",
+            trade_id="TRD_EXC_R7",
+            signal_id="SIG_EXC_R7",
             ticker="OGDC",
             action=SignalAction.BUY,
             shares=500,
@@ -1399,8 +1444,8 @@ class TestPortfolioAndJournal:
         engine = PostMortemEngine(lessons_memory=lessons_mem)
 
         trade = DemoTrade(
-            trade_id="TRD_COUNT_R6",
-            signal_id="SIG_COUNT_R6",
+            trade_id="TRD_COUNT_R7",
+            signal_id="SIG_COUNT_R7",
             ticker="OGDC",
             action=SignalAction.BUY,
             shares=500,
@@ -1430,7 +1475,7 @@ class TestPortfolioAndJournal:
             assert processed == 0
             assert len(engine.pending_queue) == 1
             assert engine.pending_queue[0].retry_count == i + 1
-            assert engine.pending_queue[0].trade_id == "TRD_COUNT_R6"
+            assert engine.pending_queue[0].trade_id == "TRD_COUNT_R7"
 
     def test_exit_condition_validation_and_evaluation(self):
         """

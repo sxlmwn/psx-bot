@@ -3,7 +3,7 @@ Pytest configuration and fixtures for tests.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 from veterandesk.config import settings
 
@@ -39,6 +39,27 @@ def mock_database_persistence() -> None:
         mock_table.upsert.return_value.execute.return_value = None
         mock_table.insert.return_value.execute.return_value = None
         mock_db_mgr.get_client.return_value = mock_client
+        yield
+
+
+@pytest.fixture(autouse=True)
+def disable_real_network_requests() -> None:
+    """
+    Disable real Telegram, Discord, and Groq API calls in tests.
+    
+    This prevents tests from making real network requests even if mocks fail to apply,
+    ensuring test isolation and preventing side effects.
+    
+    Patches both settings and get_secret to block environment variable reads.
+    """
+    def mock_get_secret(key: str, default: str = None) -> str:
+        """Mock get_secret to always return the default, blocking environment reads."""
+        return default
+    
+    with patch.object(settings, 'telegram_enabled', False), \
+         patch.object(settings, 'discord_enabled', False), \
+         patch.object(settings, 'groq_api_key', None), \
+         patch('veterandesk.config.get_secret', side_effect=mock_get_secret):
         yield
 
 
